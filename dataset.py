@@ -5,7 +5,6 @@ import ctypes
 
 import mxnet as mx
 from mxnet.gluon.data.dataset import Dataset
-import pandas as pd
 
 from mxnet.base import _LIB
 
@@ -47,8 +46,7 @@ class MXIndexedRecordIO(mx.recordio.MXRecordIO):
         self.pid = current_process().pid
         self.fidx = open(self.idx_path, self.flag)
         if not self.writable:
-            df = pd.read_csv(self.idx_path, header=None)
-            self.positions = df[0].values
+            self.positions = np.loadtxt(self.idx_path, dtype=np.int)
 
     def close(self):
         """Closes the record file."""
