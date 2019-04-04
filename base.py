@@ -4,15 +4,15 @@ import mxnet as mx
 import gluonnlp as nlp
 from gensim.models import KeyedVectors
 
-from .utils import try_gpu
-
 
 class DeepModel:
 
-    def __init__(self, vocab, model=None, log_file='train.log'):
-        self.ctx = try_gpu()
+    def __init__(self, vocab, encoder, loss, ctx, log_file='train.log'):
+        self.ctx = ctx
         self.vocab = vocab
-        self.model = model
+        self.encoder = loss
+        self.loss = loss
+
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(level=logging.WARNING)
         self.stream_log = logging.StreamHandler()
@@ -65,7 +65,9 @@ class DeepModel:
             self.file_log.setLevel(level=logging.INFO)
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
-        trainer = mx.gluon.Trainer(self.model.collect_params(),
+        params_dict = self.encoder.collect_params()
+        params_dict.update(self.loss.collect_params())
+        trainer = mx.gluon.Trainer(params_dict,
                                    optimizer,
                                    {'learning_rate': lr,
                                     'lr_scheduler': lr_scheduler})
@@ -84,8 +86,10 @@ class DeepModel:
                 self._valid_log(valid_dataset)
 
     def _clip_gradient(self, clip):
+        params_dict = self.encoder.collect_params()
+        params_dict.update(self.loss.collect_params())
         clip_params = [
-            p.data() for p in self.model.collect_params().values()]
+            p.data() for p in params_dict.values()]
 
         norm = mx.nd.array([0.0], self.ctx)
         for param in clip_params:
@@ -95,7 +99,7 @@ class DeepModel:
         if norm > clip:
             for param in clip_params:
                 if param.grad is not None:
-                    param.grad[:] *= clip / (norm + 1e-8)
+                    param.grad[:] *= clip / norm
 
     def _one_epoch(self, trainer, data_iter, epoch, clip=5.0):
         loss_val = 0.0

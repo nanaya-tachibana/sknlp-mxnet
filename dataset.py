@@ -1,14 +1,17 @@
 import os
 
+import collections
 from multiprocessing import current_process
 import ctypes
 
+import pandas as pd
 import mxnet as mx
+from mxnet.base import _LIB
+from mxnet.base import check_call
 from mxnet.gluon.data.dataset import Dataset
 
-from mxnet.base import _LIB
 
-from mxnet.base import check_call
+import gluonnlp
 
 
 class MXIndexedRecordIO(mx.recordio.MXRecordIO):
@@ -46,7 +49,8 @@ class MXIndexedRecordIO(mx.recordio.MXRecordIO):
         self.pid = current_process().pid
         self.fidx = open(self.idx_path, self.flag)
         if not self.writable:
-            self.positions = np.loadtxt(self.idx_path, dtype=np.int)
+            self.positions = pd.read_csv(self.idx_path, header=None,
+                                         dtype=int)[0].values
 
     def close(self):
         """Closes the record file."""
@@ -160,3 +164,45 @@ class RecordFileDataset(Dataset):
 
     def __len__(self):
         return len(self._record.positions)
+
+
+DATASET_DIR = 'datasets'
+
+
+class SequenceLabelDataset:
+
+    def __init__(self, vocab=None, segmenter=list, encode='utf-8'):
+        self._vocab = vocab
+        self._segmenter = segmenter
+        self._encode = 'utf-8'
+
+    def _transform(self):
+
+        if self._vocab is None:
+            counter = collections.Counter()
+            for row in self._train:
+                row = row.decode(self._encode)
+                counter.update(self._segmenter(row.split('\t')[0]))
+            self._vocab = gluonnlp.Vocab(counter)
+
+        def func(row):
+            row = row.decode('utf-8')
+            text, tags = row.split('\t')
+            return self._vocab[self._segmenter(text)], tags.split('|')
+
+        self._train = self._train.transform(func)
+        self._test = self._test.transform(func)
+
+
+class MsraDataset(SequenceLabelDataset):
+
+    DIR = 'msra'
+
+    def __init__(self, vocab=None, segmenter=list, encode='utf-8'):
+        super().__init__(vocab=vocab, segmenter=segmenter, encode=encode)
+
+        self._train = RecordFileDataset(
+            os.path.join(DATASET_DIR, self.DIR, 'train.rec'))
+        self._test = RecordFileDataset(
+            os.path.join(DATASET_DIR, self.DIR, 'test.rec'))
+        self._transform()
