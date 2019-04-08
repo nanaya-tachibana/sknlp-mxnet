@@ -1,10 +1,19 @@
 import re
 import logging
 
+import jieba_fast as jieba
 import mxnet as mx
 import numpy as np
 
 import gluonnlp as nlp
+
+
+def word_cut_func(text):
+    return jieba.lcut(text)
+
+
+def char_cut_func(text):
+    return list(text)
 
 
 def try_gpu():

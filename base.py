@@ -5,14 +5,9 @@ import gluonnlp as nlp
 from gensim.models import KeyedVectors
 
 
-class DeepModel:
+class DeepModelTrainMixin:
 
-    def __init__(self, vocab, encoder, loss, ctx, log_file='train.log'):
-        self.ctx = ctx
-        self.vocab = vocab
-        self.encoder = loss
-        self.loss = loss
-
+    def __init__(self, log_file='train.log'):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(level=logging.WARNING)
         self.stream_log = logging.StreamHandler()
@@ -65,8 +60,11 @@ class DeepModel:
             self.file_log.setLevel(level=logging.INFO)
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
-        params_dict = self.encoder.collect_params()
-        params_dict.update(self.loss.collect_params())
+
+        assert (getattr(self, '_trainable', None) is not None
+                and len(self._trainable) > 0), 'No trainable parameters'
+
+        params_dict = self._get_trainable_params()
         trainer = mx.gluon.Trainer(params_dict,
                                    optimizer,
                                    {'learning_rate': lr,
@@ -75,8 +73,6 @@ class DeepModel:
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
             if checkpoint is not None and epoch % save_frequency == 0:
                 if epoch == 1:
-                    # if hasattr(self.vocab, 'embedding'):
-                    #     self.vocab.embedding.serialize(f'{checkpoint}-vocab')
                     with open(f'{checkpoint}-vocab.json', 'w') as f:
                         f.write(self.vocab.to_json())
                 self.model.export(f'{checkpoint}', epoch=epoch)
@@ -85,13 +81,18 @@ class DeepModel:
             if valid_dataset is not None:
                 self._valid_log(valid_dataset)
 
+    def _get_trainable_params(self):
+        params_dict = self._trainable[0].collect_params()
+        for t in self._trainable[1:]:
+            params_dict.update(t.collect_params())
+        return params_dict
+
     def _clip_gradient(self, clip):
-        params_dict = self.encoder.collect_params()
-        params_dict.update(self.loss.collect_params())
+        params_dict = self._get_trainable_params()
         clip_params = [
             p.data() for p in params_dict.values()]
 
-        norm = mx.nd.array([0.0], self.ctx)
+        norm = mx.nd.array([0.0], self._ctx)
         for param in clip_params:
             if param.grad is not None:
                 norm += (param.grad ** 2).sum()
@@ -104,7 +105,7 @@ class DeepModel:
     def _one_epoch(self, trainer, data_iter, epoch, clip=5.0):
         loss_val = 0.0
         n_batch = 0
-        ctx = self.ctx
+        ctx = self._ctx
         for one_batch in data_iter:
             one_batch = [element.as_in_context(ctx) for element in one_batch]
             steps = one_batch[0].shape[0]
