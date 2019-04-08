@@ -1,28 +1,33 @@
 import os
 
-import collections
 from multiprocessing import current_process
+import collections
 import ctypes
 
 import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MultiLabelBinarizer
+
 import mxnet as mx
 from mxnet.base import _LIB
 from mxnet.base import check_call
 from mxnet.gluon.data.dataset import Dataset
 
-
 import gluonnlp
 
+from utils import word_cut_func
 
-class MXIndexedRecordIO(mx.recordio.MXRecordIO):
-    """Reads/writes `RecordIO` data format, supporting random access.
+
+class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
+    """
+    Reads/writes `RecordIO` data format, supporting random access.
 
     Examples
     ---------
     >>> for i in range(5):
     ...     record.write_idx(i, 'record_%d'%i)
     >>> record.close()
-    >>> record = mx.recordio.MXIndexedRecordIO('tmp.idx', 'tmp.rec', 'r')
+    >>> record = SimpleIndexedRecordIO('tmp.idx', 'tmp.rec', 'r')
     >>> record.read_idx(3)
     record_3
 
@@ -34,117 +39,74 @@ class MXIndexedRecordIO(mx.recordio.MXRecordIO):
         Path to the record file. Only supports seekable file types.
     flag : str
         'w' for write or 'r' for read.
-    key_type : type
-        Data type for keys.
     """
 
-    def __init__(self, idx_path, uri, flag, key_type=int):
+    def __init__(self, idx_path, uri, flag):
         self.idx_path = idx_path
+        self.flag = flag
         self.fidx = None
-        self.pid = None
-        super(MXIndexedRecordIO, self).__init__(uri, flag)
+        super().__init__(idx_path, uri, flag)
 
     def open(self):
-        super(MXIndexedRecordIO, self).open()
+        """
+        Opens the record file.
+        """
+        if self.flag == "w":
+            check_call(_LIB.MXRecordIOWriterCreate(self.uri,
+                                                   ctypes.byref(self.handle)))
+            self.writable = True
+        elif self.flag == "r":
+            check_call(_LIB.MXRecordIOReaderCreate(self.uri,
+                                                   ctypes.byref(self.handle)))
+            self.writable = False
+        else:
+            raise ValueError("Invalid flag %s" % self.flag)
         self.pid = current_process().pid
-        self.fidx = open(self.idx_path, self.flag)
+        self.is_open = True
+
+        self.fidx = open(self.idx_path, self.flag)  # 兼容父类close方法
         if not self.writable:
-            self.positions = pd.read_csv(self.idx_path, header=None,
-                                         dtype=int)[0].values
-
-    def close(self):
-        """Closes the record file."""
-        if not self.is_open:
-            return
-        super(MXIndexedRecordIO, self).close()
-        self.fidx.close()
-        self.pid = None
-
-    def __getstate__(self):
-        """Override pickling behavior."""
-        d = super(MXIndexedRecordIO, self).__getstate__()
-        d['fidx'] = None
-        return d
+            self.positions = pd.read_csv(
+                self.idx_path, header=None, dtype=int)[0].values
 
     def seek(self, idx):
-        """Sets the current read pointer position.
+        """
+        Sets the current read pointer position.
 
-        This function is internally called by `read_idx(idx)` to find the current
-        reader pointer position. It doesn't return anything."""
+        This function is internally called by `read_idx(idx)` to
+        find the current reader pointer position.
+        It doesn't return anything.
+        """
         assert not self.writable
         self._check_pid(allow_reset=True)
         pos = ctypes.c_size_t(self.positions[idx])
         check_call(_LIB.MXRecordIOReaderSeek(self.handle, pos))
 
-    def tell(self):
-        """Returns the current position of write head.
-
-        Examples
-        ---------
-        >>> record = mx.recordio.MXIndexedRecordIO('tmp.idx', 'tmp.rec', 'w')
-        >>> print(record.tell())
-        0
-        >>> for i in range(5):
-        ...     record.write_idx(i, 'record_%d'%i)
-        ...     print(record.tell())
-        16
-        32
-        48
-        64
-        80
-        """
-        assert self.writable
-        pos = ctypes.c_size_t()
-        check_call(_LIB.MXRecordIOWriterTell(self.handle, ctypes.byref(pos)))
-        return pos.value
-
-    def read_idx(self, idx):
-        """Returns the record at given index.
-
-        Examples
-        ---------
-        >>> record = mx.recordio.MXIndexedRecordIO('tmp.idx', 'tmp.rec', 'w')
-        >>> for i in range(5):
-        ...     record.write_idx(i, 'record_%d'%i)
-        >>> record.close()
-        >>> record = mx.recordio.MXIndexedRecordIO('tmp.idx', 'tmp.rec', 'r')
-        >>> record.read_idx(3)
-        record_3
-        """
-        self.seek(idx)
-        return self.read()
-
     def write(self, buf):
-        """Inserts input record at given index.
+        """
+        Inserts input record.
 
         Examples
         ---------
         >>> for i in range(5):
-        ...     record.write_idx(i, 'record_%d'%i)
+        ...     record.write('record_%d'%i)
         >>> record.close()
 
         Parameters
         ----------
         idx : int
             Index of a file.
-        buf :
+        buf : byte
             Record to write.
         """
         pos = self.tell()
         super().write(buf)
         self.fidx.write('%d\n' % pos)
 
-    def _check_pid(self, allow_reset=False):
-        """Check process id to ensure integrity, reset if in new process."""
-        if not self.pid == current_process().pid:
-            if allow_reset:
-                self.reset()
-            else:
-                raise RuntimeError("Forbidden operation in multiple processes")
-
 
 class RecordFileDataset(Dataset):
-    """A dataset wrapping over a RecordIO (.rec) file.
+    """
+    A dataset wrapper for a RecordIO (.rec) file.
 
     Each sample is a string representing the raw content of an record.
 
@@ -157,7 +119,7 @@ class RecordFileDataset(Dataset):
     def __init__(self, filename):
         self.idx_file = os.path.splitext(filename)[0] + '.idx'
         self.filename = filename
-        self._record = MXIndexedRecordIO(self.idx_file, self.filename, 'r')
+        self._record = SimpleIndexedRecordIO(self.idx_file, self.filename, 'r')
 
     def __getitem__(self, idx):
         return self._record.read_idx(idx)
@@ -166,43 +128,193 @@ class RecordFileDataset(Dataset):
         return len(self._record.positions)
 
 
+class InMemoryDataset(Dataset):
+    """
+    A dataset wrapper for lists.
+
+
+    Parameters
+    ----------
+    text_list: list
+        List of text.
+    label_list: list
+        List of label
+    """
+
+    def __init__(self, text_list, label_list):
+        self._record = ['\t'.join([text, label])
+                        for text, label in zip(text_list, label_list)]
+
+    def __getitem__(self, idx):
+        return self._record[idx]
+
+    def __len__(self):
+        return len(self._record)
+
+
+class NLPDatasetMixin:
+    """
+    A dataset mixin which implements basic preprocess for NLP data.
+
+    Always used with a `Dataset`.
+    """
+
+    def __init__(self, vocab=None, label2idx=None, segmenter=list,
+                 encode='utf-8', max_length=100, **kwargs):
+        super().__init__(**kwargs)
+        self.vocab = vocab
+        self.label2idx = label2idx
+        self._segmenter = segmenter
+        self._encode = encode
+        self._max_length = max_length
+
+        if self.label2idx is None or self.vocab is None:
+            counter = collections.Counter()
+            label_set = set()
+            for i in range(super().__len__()):
+                row = super().__getitem__(i)
+                if self._encode is not None:
+                    row = row.decode(self._encode)
+                text, label = row.split('\t')
+                if self.vocab is None:
+                    counter.update(self._segmenter(text))
+                if self.label2idx is None:
+                    labels = label.split('|')
+                    label_set.update(labels)
+        if self.vocab is None:
+            self.vocab = gluonnlp.Vocab(counter)
+        if self.label2idx is None:
+            label_list = list(label_set)
+            label_list.sort()
+            self.label2idx = dict(zip(label_list, range(len(label_set))))
+        self._idx2label = {v: k for k, v in self.label2idx.items()}
+
+    def _preprocess_text(self, text):
+        return self.vocab[self._segmenter(text[:self._max_length])]
+
+    def _preprocess_label(self, label):
+        return [self.label2idx[l] for l in label.split('|')]
+
+    def _preprocess_func(self, row):
+        if self._encode is not None:
+            row = row.decode('utf-8')
+        text, label = row.split('\t')
+        text = self._preprocess_text(text)
+        label = self._preprocess_label(label)
+        mask = np.ones(len(text), dtype=np.float32)
+        return text, mask, label
+
+    def idx2tokens(self, idx_list):
+        return self.vocab.to_tokens(idx_list)
+
+    def __getitem__(self, idx):
+        row = super().__getitem__(idx)
+        return self._preprocess_func(row)
+
+
+class ClassifyDatasetMixin(NLPDatasetMixin):
+
+    def __init__(self, vocab=None, label2idx=None, segmenter=list,
+                 encode='utf-8', max_length=100, **kwargs):
+        super().__init__(vocab=vocab, label2idx=label2idx,
+                         segmenter=segmenter, encode=encode,
+                         max_length=max_length, **kwargs)
+        self._binarizer = MultiLabelBinarizer([
+            self._idx2label[i] for i in range(len(self.label2idx))])
+
+    def _preprocess_label(self, label):
+        return self._binarizer.fit_transform([label.split('|')])[0]\
+                              .astype(np.float32)
+
+    def idx2labels(self, idx_list):
+        return [self._idx2label.get(i, None) for i in idx_list]
+
+
+class SequenceTagDatasetMixin(NLPDatasetMixin):
+
+    def _preprocess_label(self, label):
+        return [self.label2idx[l] for l in label.split('|')[:self._max_length]]
+
+    def idx2labels(self, idx_list):
+        return [self._idx2label.get(i, 'O') for i in idx_list]
+
+
+class _SimpleClassifyDataset(ClassifyDatasetMixin, InMemoryDataset):
+    """
+    A dataset wrapper for `InMemoryDataset` with `NLPDatasetMixin`.
+
+    Examples
+    ---------
+    >>> ds = _SimpleClassifyDataset(['大叫好', '大家好', '好厉害'], ['1|2', '1|2|3', '3|1'])
+    >>> len(ds)
+    3
+    >>> ds[0]
+    ([5, 7, 4], [2, 1])
+    """
+
+    def __init__(self, text_list, label_list, vocab=None, label2idx=None,
+                 segmenter=list, encode=None, max_length=100):
+        super().__init__(text_list=text_list,
+                         label_list=label_list,
+                         vocab=vocab,
+                         label2idx=label2idx,
+                         segmenter=segmenter,
+                         encode=encode,
+                         max_length=max_length)
+
+
+class _SimpleSequenceTagDataset(_SimpleClassifyDataset,
+                                SequenceTagDatasetMixin):
+    pass
+
+
 DATASET_DIR = 'datasets'
 
 
-class SequenceLabelDataset:
-
-    def __init__(self, vocab=None, segmenter=list, encode='utf-8'):
-        self._vocab = vocab
-        self._segmenter = segmenter
-        self._encode = 'utf-8'
-
-    def _transform(self):
-
-        if self._vocab is None:
-            counter = collections.Counter()
-            for row in self._train:
-                row = row.decode(self._encode)
-                counter.update(self._segmenter(row.split('\t')[0]))
-            self._vocab = gluonnlp.Vocab(counter)
-
-        def func(row):
-            row = row.decode('utf-8')
-            text, tags = row.split('\t')
-            return self._vocab[self._segmenter(text)], tags.split('|')
-
-        self._train = self._train.transform(func)
-        self._test = self._test.transform(func)
-
-
-class MsraDataset(SequenceLabelDataset):
+class MsraDataset(SequenceTagDatasetMixin, RecordFileDataset):
 
     DIR = 'msra'
 
-    def __init__(self, vocab=None, segmenter=list, encode='utf-8'):
-        super().__init__(vocab=vocab, segmenter=segmenter, encode=encode)
+    def __init__(self, is_train_file=True, vocab=None, label2idx=None,
+                 segmenter=list, encode='utf-8', max_length=100):
+        filename = 'train.rec' if is_train_file else 'test.rec'
+        super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
+                                               filename),
+                         vocab=vocab,
+                         label2idx=label2idx,
+                         segmenter=segmenter,
+                         encode=encode,
+                         max_length=max_length)
 
-        self._train = RecordFileDataset(
-            os.path.join(DATASET_DIR, self.DIR, 'train.rec'))
-        self._test = RecordFileDataset(
-            os.path.join(DATASET_DIR, self.DIR, 'test.rec'))
-        self._transform()
+
+class WaimaiDataset(ClassifyDatasetMixin, RecordFileDataset):
+
+    DIR = 'waimai'
+
+    def __init__(self, is_train_file=True, vocab=None, label2idx=None,
+                 segmenter=list, encode='utf-8', max_length=100):
+        filename = 'train.rec' if is_train_file else 'test.rec'
+        super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
+                                               filename),
+                         vocab=vocab,
+                         label2idx=label2idx,
+                         segmenter=segmenter,
+                         encode=encode,
+                         max_length=max_length)
+
+
+def load_dataset(dataset):
+    train_dataset = dataset(True, segmenter=word_cut_func)
+    test_dataset = dataset(False,
+                           vocab=train_dataset.vocab,
+                           label2idx=train_dataset.label2idx,
+                           segmenter=word_cut_func)
+    return train_dataset, test_dataset
+
+
+def load_msra_dataset():
+    return load_dataset(MsraDataset)
+
+
+def load_waimai_dataset():
+    return load_dataset(WaimaiDataset)
