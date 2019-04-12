@@ -1,21 +1,20 @@
+import json
 import logging
 
 import mxnet as mx
 import gluonnlp as nlp
 from gensim.models import KeyedVectors
 
+from .utils import logger, stream_log, file_log
+
 
 class DeepModelTrainMixin:
 
-    def __init__(self, log_file='train.log'):
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(level=logging.WARNING)
-        self.stream_log = logging.StreamHandler()
-        self.stream_log.setLevel(level=logging.WARNING)
-        self.file_log = logging.FileHandler(log_file)
-        self.file_log.setLevel(level=logging.WARNING)
-        self.logger.addHandler(self.stream_log)
-        self.logger.addHandler(self.file_log)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = logger
+        self.stream_log = stream_log
+        self.file_log = file_log
 
     def _fit(self, train_dataloader, lr, n_epochs,
              valid_dataset=None,
@@ -71,12 +70,17 @@ class DeepModelTrainMixin:
                                     'lr_scheduler': lr_scheduler})
         for epoch in range(1, n_epochs + 1):
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
+            self._trained = True
             if checkpoint is not None and epoch % save_frequency == 0:
                 if epoch == 1:
                     with open(f'{checkpoint}-vocab.json', 'w') as f:
-                        f.write(self.vocab.to_json())
-                self.model.export(f'{checkpoint}', epoch=epoch)
-                self.model.save_parameters(f'{checkpoint}-{epoch:04}-params')
+                        f.write(self._vocab.to_json())
+                    if getattr(self, 'meta', None):
+                        with open(f'{checkpoint}-meta.json', 'w') as f:
+                            f.write(json.dumps(self.meta))
+                for i, item in enumerate(self._trainable):
+                    item.export(f'{checkpoint}-{i}', epoch=epoch)
+                    item.save_parameters(f'{checkpoint}-{i}-{epoch:04}-params')
             # valid
             if valid_dataset is not None:
                 self._valid_log(valid_dataset)
