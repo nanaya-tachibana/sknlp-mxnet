@@ -7,6 +7,15 @@ import numpy as np
 
 import gluonnlp as nlp
 
+logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.WARNING)
+stream_log = logging.StreamHandler()
+stream_log.setLevel(level=logging.WARNING)
+file_log = logging.FileHandler('train.log')
+file_log.setLevel(level=logging.WARNING)
+logger.addHandler(stream_log)
+logger.addHandler(file_log)
+
 
 def word_cut_func(text):
     return jieba.lcut(text)
@@ -47,7 +56,7 @@ def preprocess(data, padding=False, cut_func=word_cut_func, max_length=50):
 
 def _pad_arrs_to_max_length(arrs, pad_axis, pad_val,
                             use_shared_mem, dtype,
-                            max_length=None):
+                            min_length=0):
     """Inner Implementation of the Pad batchify
 
     Parameters
@@ -71,7 +80,7 @@ def _pad_arrs_to_max_length(arrs, pad_axis, pad_val,
         dtype = arrs[0].dtype if dtype is None else dtype
 
     original_length = [ele.shape[pad_axis] for ele in arrs]
-    max_size = max_length or max(original_length)
+    max_size = max(min_length, max(original_length))
     arrs = [arr[:max_size] for arr in arrs]
 
     ret_shape = list(arrs[0].shape)
@@ -168,7 +177,7 @@ class Pad(nlp.data.batchify.Pad):
     """
 
     def __init__(self, axis=0, pad_val=0,
-                 max_length=None,
+                 min_length=0,
                  ret_length=False, dtype=None):
         self._axis = axis
         assert isinstance(axis, int), f'axis must be an integer! ' \
@@ -178,7 +187,7 @@ class Pad(nlp.data.batchify.Pad):
         self._ret_length = ret_length
         self._dtype = dtype
         self._warned = False
-        self._max_length = max_length
+        self._min_length = min_length
 
     def __call__(self, data):
         """Batchify the input data.
@@ -217,7 +226,7 @@ class Pad(nlp.data.batchify.Pad):
             padded_arr, original_length = _pad_arrs_to_max_length(
                 data, self._axis,
                 self._pad_val, True,
-                self._dtype, self._max_length)
+                self._dtype, self._min_length)
             if self._ret_length:
                 return padded_arr, original_length
             else:

@@ -15,7 +15,7 @@ from mxnet.gluon.data.dataset import Dataset
 
 import gluonnlp
 
-from utils import word_cut_func
+from .utils import word_cut_func
 
 
 class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
@@ -184,6 +184,7 @@ class NLPDatasetMixin:
         if self.vocab is None:
             self.vocab = gluonnlp.Vocab(counter)
         if self.label2idx is None:
+            label_set.discard('')
             label_list = list(label_set)
             label_list.sort()
             self.label2idx = dict(zip(label_list, range(len(label_set))))
@@ -303,6 +304,28 @@ class WaimaiDataset(ClassifyDatasetMixin, RecordFileDataset):
                          max_length=max_length)
 
 
+class IntentDataset(ClassifyDatasetMixin, RecordFileDataset):
+
+    DIR = 'intent'
+
+    def __init__(self, is_train_file=True, vocab=None, label2idx=None,
+                 segmenter=list, encode='utf-8', max_length=100):
+        filename = 'train.rec' if is_train_file else 'test.rec'
+        super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
+                                               filename),
+                         vocab=vocab,
+                         label2idx=label2idx,
+                         segmenter=segmenter,
+                         encode=encode,
+                         max_length=max_length)
+
+    def _preprocess_label(self, label):
+        if label == 'nonsense':
+            label = ''
+        return self._binarizer.fit_transform([label.split('|')])[0]\
+                              .astype(np.float32)
+
+
 def load_dataset(dataset):
     train_dataset = dataset(True, segmenter=word_cut_func)
     test_dataset = dataset(False,
@@ -318,3 +341,7 @@ def load_msra_dataset():
 
 def load_waimai_dataset():
     return load_dataset(WaimaiDataset)
+
+
+def load_intent_dataset():
+    return load_dataset(IntentDataset)

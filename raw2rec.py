@@ -4,7 +4,7 @@ import click
 import numpy as np
 import pandas as pd
 
-from dataset import SimpleIndexedRecordIO
+from sknlp.dataset import SimpleIndexedRecordIO
 
 
 def str_w2n(wide_str):
@@ -78,3 +78,26 @@ def waimai2rec(file_dir):
                 str_w2n(row.review).replace('\t', ' '),
                 row.label]).encode('utf-8'))
         dataset.close()
+
+
+def intent2rec(file_dir):
+    for data_type in ('train', 'test'):
+        df = pd.read_csv(os.path.join(file_dir, f'{data_type}.csv'),
+                         sep='\t', dtype=str)
+        df.fillna('', inplace=True)
+        idx = os.path.join(file_dir, f'{data_type}.idx')
+        rec = os.path.join(file_dir, f'{data_type}.rec')
+
+        dataset = SimpleIndexedRecordIO(idx, rec, 'w')
+        dataset.open()
+        for i, row in df.iterrows():
+            intent = row.intent
+            if intent == 'nonsense':
+                intent = ''
+            dataset.write('\t'.join([
+                str_w2n(row.text).replace('\t', ' '), intent]).encode('utf-8'))
+        dataset.close()
+
+
+if __name__ == '__main__':
+    intent2rec('datasets/intent')
