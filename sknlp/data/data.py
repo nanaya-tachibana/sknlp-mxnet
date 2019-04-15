@@ -1,4 +1,5 @@
 import os
+from typing import IO, Optional
 
 from multiprocessing import current_process
 import collections
@@ -20,12 +21,14 @@ from .utils import word_cut_func
 
 class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
     """
-    Reads/writes `RecordIO` data format, supporting random access.
+    Indexed ``RecordIO`` data format, 支持随机存取.
 
     Examples
     ---------
+    record = SimpleIndexedRecordIO('tmp.idx', 'tmp.rec', 'w')
     >>> for i in range(5):
-    ...     record.write_idx(i, 'record_%d'%i)
+    ...    d = 'record_%d' % i
+    ...    record.write(d.encode('utf-8'))
     >>> record.close()
     >>> record = SimpleIndexedRecordIO('tmp.idx', 'tmp.rec', 'r')
     >>> record.read_idx(3)
@@ -33,23 +36,23 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
 
     Parameters
     ----------
-    idx_path : str
-        Path to the index file.
-    uri : str
-        Path to the record file. Only supports seekable file types.
-    flag : str
-        'w' for write or 'r' for read.
+    idx_path: ``str``
+        index文件路径
+    uri: ``str``
+        record文件路径, 仅支持seekable文件类型
+    flag: ``str``
+        'w'(写)或者'r'(读)
     """
 
-    def __init__(self, idx_path, uri, flag):
+    def __init__(self, idx_path: str, uri: str, flag: str) -> None:
         self.idx_path = idx_path
         self.flag = flag
-        self.fidx = None
         super().__init__(idx_path, uri, flag)
+        self.fidx: IO = open(self.idx_path, self.flag)  # 兼容父类close方法
 
-    def open(self):
+    def open(self) -> None:
         """
-        Opens the record file.
+
         """
         if self.flag == "w":
             check_call(_LIB.MXRecordIOWriterCreate(self.uri,
@@ -64,12 +67,7 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
         self.pid = current_process().pid
         self.is_open = True
 
-        self.fidx = open(self.idx_path, self.flag)  # 兼容父类close方法
-        if not self.writable:
-            self.positions = pd.read_csv(
-                self.idx_path, header=None, dtype=int)[0].values
-
-    def seek(self, idx):
+    def seek(self, idx: int) -> None:
         """
         Sets the current read pointer position.
 
@@ -82,7 +80,7 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
         pos = ctypes.c_size_t(self.positions[idx])
         check_call(_LIB.MXRecordIOReaderSeek(self.handle, pos))
 
-    def write(self, buf):
+    def write(self, buf: bytes) -> None:
         """
         Inserts input record.
 

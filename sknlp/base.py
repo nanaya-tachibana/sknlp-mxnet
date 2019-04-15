@@ -2,8 +2,6 @@ import json
 import logging
 
 import mxnet as mx
-import gluonnlp as nlp
-from gensim.models import KeyedVectors
 
 from .utils import logger, stream_log, file_log
 
@@ -152,15 +150,3 @@ class DeepModelTrainMixin:
 
     def save_model(self, file_preifx=''):
         pass
-
-    @classmethod
-    def create_vocab_from_word2vec_file(cls, word2vec_file, binary=True):
-        embed = KeyedVectors.load_word2vec_format(word2vec_file, binary=binary)
-        counter = nlp.data.count_tokens(embed.vocab.keys())
-        vocab = nlp.Vocab(counter)
-
-        embed_weight = embed[vocab.idx_to_token[4:]]
-        embed_weight = mx.nd.concat(mx.nd.zeros((4, embed_weight.shape[1])),
-                                    mx.nd.array(embed_weight),
-                                    dim=0)
-        return vocab, embed_weight
