@@ -1,28 +1,9 @@
 import re
-import logging
 
-import jieba_fast as jieba
 import mxnet as mx
 import numpy as np
 
 import gluonnlp as nlp
-
-logger = logging.getLogger(__name__)
-logger.setLevel(level=logging.WARNING)
-stream_log = logging.StreamHandler()
-stream_log.setLevel(level=logging.WARNING)
-file_log = logging.FileHandler('train.log')
-file_log.setLevel(level=logging.WARNING)
-logger.addHandler(stream_log)
-logger.addHandler(file_log)
-
-
-def word_cut_func(text):
-    return jieba.lcut(text)
-
-
-def char_cut_func(text):
-    return list(text)
 
 
 def try_gpu():
@@ -39,19 +20,19 @@ def strip_whitespace(s):
     return re.sub('[\s\t\n]+', '', s)
 
 
-def preprocess(data, padding=False, cut_func=word_cut_func, max_length=50):
-    query = data[0]
-    candidate = data[1]
-    y = data[2]
-    seg_query = list(cut_func(strip_whitespace(query)))[:max_length]
-    query_len = len(seg_query)
-    seg_candidate = list(cut_func(strip_whitespace(candidate)))[:max_length]
-    candidate_len = len(seg_candidate)
-    if padding:
-        seg_query.extend(['<unk>'] * (max_length - len(seg_query)))
-        seg_candidate.extend(['<unk>'] * (max_length - len(seg_candidate)))
-    return ((seg_query, seg_candidate, query_len, candidate_len, y),
-            (query_len, candidate_len))
+# def preprocess(data, padding=False, cut_func=word_cut_func, max_length=50):
+#     query = data[0]
+#     candidate = data[1]
+#     y = data[2]
+#     seg_query = list(cut_func(strip_whitespace(query)))[:max_length]
+#     query_len = len(seg_query)
+#     seg_candidate = list(cut_func(strip_whitespace(candidate)))[:max_length]
+#     candidate_len = len(seg_candidate)
+#     if padding:
+#         seg_query.extend(['<unk>'] * (max_length - len(seg_query)))
+#         seg_candidate.extend(['<unk>'] * (max_length - len(seg_candidate)))
+#     return ((seg_query, seg_candidate, query_len, candidate_len, y),
+#             (query_len, candidate_len))
 
 
 def _pad_arrs_to_max_length(arrs, pad_axis, pad_val,
