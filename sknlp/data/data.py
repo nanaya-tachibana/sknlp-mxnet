@@ -16,12 +16,12 @@ from mxnet.gluon.data.dataset import Dataset
 
 import gluonnlp
 
-from .utils import word_cut_func
+from .segmener import Segmenter
 
 
 class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
     """
-    Indexed ``RecordIO`` data format, 支持随机存取.
+    Indexed `RecordIO` data format, 支持随机存取.
 
     Examples
     ---------
@@ -36,11 +36,11 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
 
     Parameters
     ----------
-    idx_path: ``str``
+    idx_path: `str`
         index文件路径
-    uri: ``str``
+    uri: `str`
         record文件路径, 仅支持seekable文件类型
-    flag: ``str``
+    flag: `str`
         'w'(写)或者'r'(读)
     """
 
@@ -66,6 +66,8 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
             raise ValueError("Invalid flag %s" % self.flag)
         self.pid = current_process().pid
         self.is_open = True
+        if not self.writable:
+            self.positions = pd.read_csv(self.idx_path, header=None)[0].values
 
     def seek(self, idx: int) -> None:
         """
@@ -157,12 +159,14 @@ class NLPDatasetMixin:
     Always used with a `Dataset`.
     """
 
-    def __init__(self, vocab=None, label2idx=None, segmenter=list,
+    def __init__(self, vocab=None, label2idx=None, segmenter=None,
                  encode='utf-8', max_length=100, **kwargs):
         super().__init__(**kwargs)
         self.vocab = vocab
         self.label2idx = label2idx
-        self._segmenter = segmenter
+        cutter = Segmenter(segmenter)
+        print(cutter.cut('我们'))
+        self._segmenter = cutter.cut
         self._encode = encode
         self._max_length = max_length
 
@@ -213,7 +217,7 @@ class NLPDatasetMixin:
 
 class ClassifyDatasetMixin(NLPDatasetMixin):
 
-    def __init__(self, vocab=None, label2idx=None, segmenter=list,
+    def __init__(self, vocab=None, label2idx=None, segmenter=None,
                  encode='utf-8', max_length=100, **kwargs):
         super().__init__(vocab=vocab, label2idx=label2idx,
                          segmenter=segmenter, encode=encode,
@@ -252,7 +256,7 @@ class _SimpleClassifyDataset(ClassifyDatasetMixin, InMemoryDataset):
     """
 
     def __init__(self, text_list, label_list, vocab=None, label2idx=None,
-                 segmenter=list, encode=None, max_length=100):
+                 segmenter=None, encode=None, max_length=100):
         super().__init__(text_list=text_list,
                          label_list=label_list,
                          vocab=vocab,
@@ -275,7 +279,7 @@ class MsraDataset(SequenceTagDatasetMixin, RecordFileDataset):
     DIR = 'msra'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=list, encode='utf-8', max_length=100):
+                 segmenter=None, encode='utf-8', max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
@@ -291,7 +295,7 @@ class WaimaiDataset(ClassifyDatasetMixin, RecordFileDataset):
     DIR = 'waimai'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=list, encode='utf-8', max_length=100):
+                 segmenter=None, encode='utf-8', max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
@@ -307,7 +311,7 @@ class IntentDataset(ClassifyDatasetMixin, RecordFileDataset):
     DIR = 'intent'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=list, encode='utf-8', max_length=100):
+                 segmenter=None, encode='utf-8', max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
@@ -324,22 +328,22 @@ class IntentDataset(ClassifyDatasetMixin, RecordFileDataset):
                               .astype(np.float32)
 
 
-def load_dataset(dataset):
-    train_dataset = dataset(True, segmenter=word_cut_func)
+def load_dataset(dataset, segmenter='jieba'):
+    train_dataset = dataset(True, segmenter=segmenter)
     test_dataset = dataset(False,
                            vocab=train_dataset.vocab,
                            label2idx=train_dataset.label2idx,
-                           segmenter=word_cut_func)
+                           segmenter=segmenter)
     return train_dataset, test_dataset
 
 
-def load_msra_dataset():
-    return load_dataset(MsraDataset)
+def load_msra_dataset(segmenter=None):
+    return load_dataset(MsraDataset, segmenter=segmenter)
 
 
-def load_waimai_dataset():
-    return load_dataset(WaimaiDataset)
+def load_waimai_dataset(segmenter='jieba'):
+    return load_dataset(WaimaiDataset, segmenter=segmenter)
 
 
-def load_intent_dataset():
-    return load_dataset(IntentDataset)
+def load_intent_dataset(segmenter='jieba'):
+    return load_dataset(IntentDataset, segmenter=segmenter)

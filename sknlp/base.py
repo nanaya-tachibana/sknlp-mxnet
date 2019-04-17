@@ -3,13 +3,13 @@ import logging
 
 import mxnet as mx
 
-from .utils import logger, stream_log, file_log
+from .logger import logger, stream_log, file_log
+from .data import _SimpleClassifyDataset
 
 
-class DeepModelTrainMixin:
+class BaseModel:
 
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
         self.logger = logger
         self.stream_log = stream_log
         self.file_log = file_log
@@ -70,15 +70,7 @@ class DeepModelTrainMixin:
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
             self._trained = True
             if checkpoint is not None and epoch % save_frequency == 0:
-                if epoch == 1:
-                    with open(f'{checkpoint}-vocab.json', 'w') as f:
-                        f.write(self._vocab.to_json())
-                    if getattr(self, 'meta', None):
-                        with open(f'{checkpoint}-meta.json', 'w') as f:
-                            f.write(json.dumps(self.meta))
-                for i, item in enumerate(self._trainable):
-                    item.export(f'{checkpoint}-{i}', epoch=epoch)
-                    item.save_parameters(f'{checkpoint}-{i}-{epoch:04}-params')
+                self.save_model(f'{checkpoint}')
             # valid
             if valid_dataset is not None:
                 self._valid_log(valid_dataset)
@@ -148,5 +140,97 @@ class DeepModelTrainMixin:
         """
         raise NotImplementedError('valid log function is not implemented.')
 
-    def save_model(self, file_preifx=''):
-        pass
+
+class DeepModel(BaseModel):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def _build_net(self):
+        """
+        Implement this function to build net.
+        """
+        raise NotImplementedError('build net is not implemented.')
+
+    def _build(self):
+        """
+        Implement this function to build.
+        """
+        raise NotImplementedError('build is not implemented.')
+
+    def _initialize_net(self):
+        self._net.initialize(init=mx.init.Xavier(), ctx=self._ctx)
+        self._loss.initialize(init=mx.init.Xavier(), ctx=self._ctx)
+        if self._embed_weight is not None:
+            self._net.embedding_layer.weight.set_data(self._embed_weight)
+        self._net.hybridize()
+        self._loss.hybridize()
+
+    def _build_dataloader(self, dataset, batch_size, shuffle, last_batch):
+        return mx.gluon.data.DataLoader(dataset=dataset,
+                                        batch_size=batch_size,
+                                        shuffle=shuffle,
+                                        last_batch=last_batch,
+                                        batchify_fn=self._batchify_fn)
+
+    def _get_or_build_dataset(self, dataset, X, y):
+        """
+        Implement this function to build net.
+        """
+        raise NotImplementedError('build net is not implemented.')
+
+    def fit(self, X=None, y=None, train_dataset=None,
+            valid_X=None, valid_y=None, valid_dataset=None,
+            batch_size=32, last_batch='keep',
+            update_embedding=True, n_epochs=15,
+            optimizer='adam', lr=3e-4, clip=5.0, verbose=True,
+            checkpoint=None, save_frequency=1):
+        """
+        Fit model.
+
+        Parameters:
+        ----
+        train_dataset: list of tuples
+          Each tuple is a (text, tags) pair.
+        valid_dataset: list of tuples
+          Each tuple is a (text, tags) pair. If None, valid log will be ignored
+        cut_func: function
+          Function used to segment text.
+        n_epochs: int
+          Number of training epochs
+        optimizer: str
+          Optimizers in mxnet.
+        lr: float
+          Start learning rate.
+        clip: float
+          Normal clip.
+        verbose:
+          If true, training loss and validation score will be logged.
+        checkpoint: str
+          If not None, save model using `checkpoint` as prefix.
+        save_frequency: int
+          If checkpoint is not None, save model every `save_frequency` epochs.
+        """
+        train_dataset = self._get_or_build_dataset(train_dataset, X, y)
+        assert self._num_classes == len(train_dataset.label2idx)
+
+        self.idx2labels = train_dataset.idx2labels
+        if self._vocab is None:
+            self._vocab = train_dataset.vocab
+            self._build()
+        if self._label2idx is None:
+            self._label2idx = train_dataset.label2idx
+            self.meta['label2idx'] = self._label2idx
+
+        if valid_X and valid_y and valid_dataset is None:
+            valid_dataset = self._get_or_build_dataset(train_dataset, X, y)
+
+        if not update_embedding:
+            self._net.embedding_layer.weight.grad_req = 'null'
+
+        dataloader = self._build_dataloader(train_dataset, batch_size,
+                                            True, last_batch)
+        self._fit(dataloader, lr, n_epochs,
+                  valid_dataset=valid_dataset,
+                  optimizer=optimizer, clip=clip, verbose=verbose,
+                  checkpoint=checkpoint, save_frequency=save_frequency)

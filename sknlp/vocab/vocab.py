@@ -15,16 +15,16 @@ class Vocab(gluonnlp.Vocab):
 
         Parameters
         ----------
-        file_path: ``str``
+        file_path: `str`
             word2vec文件路径
-        binary: ``bool``, optional(default=``True``)
+        binary: `bool`, optional(default=`True`)
             word2vec文件是否以二进制存储
 
         Returns
         ----------
-        vocab: ``Vocab``
+        vocab: `Vocab`
             词汇表
-        embed: ``numpy.array``, shape(vocab_size, embed_size)
+        embed: `numpy.array`, shape(vocab_size, embed_size)
             embedding矩阵
         """
         embed = KeyedVectors.load_word2vec_format(file_path, binary=binary)

@@ -1,5 +1,8 @@
+import os
 import json
 import itertools
+import tempfile
+import shutil
 
 import numpy as np
 from scipy.special import expit
@@ -9,9 +12,8 @@ from mxnet.gluon import nn, rnn
 import gluonnlp
 from sklearn.metrics import precision_recall_fscore_support
 
-from .base import DeepModelTrainMixin
-from .dataset import _SimpleClassifyDataset
-from .utils import word_cut_func, Pad
+from .base import DeepModel
+from .data import Pad, _SimpleClassifyDataset
 from .embedding import EmbeddingLayer
 
 
@@ -58,13 +60,13 @@ class TextRNN(nn.HybridBlock):
             self.dense_layer = nn.Dense(output_size, flatten=False,
                                         prefix='dense_')
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, inputs, mask=None):
         """
         inputs: shape(seq_length, batch_size)
         mask: shape(seq_length, batch_size)
         """
         rnn_output = self.rnn_layer(inputs)
-        if self._dense_connection == 'last':
+        if self._dense_connection == 'last' and mask is not None:
             rnn_output = F.SequenceLast(rnn_output,
                                         sequence_length=F.sum(mask, axis=0),
                                         use_sequence_length=True)
@@ -91,17 +93,17 @@ class _ClassifyBlockComposition(nn.HybridBlock):
             self.embedding_layer = embedding_layer
             self.encode_layer = encode_layer
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, inputs, mask=None):
         return self.encode_layer(self.embedding_layer(inputs), mask)
 
 
-class DeepClassifier(DeepModelTrainMixin):
+class DeepClassifier(DeepModel):
 
-    def __init__(self, num_classes, class_weight=None,
-                 is_multilabel=False, ctx=mx.cpu(),
+    def __init__(self, num_classes=2, class_weight=None,
+                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
                  vocab=None, embed_weight=None,
-                 segmenter=word_cut_func, max_length=100, embed_size=100):
-        super().__init__()
+                 segmenter='jieba', max_length=100, embed_size=100, **kwargs):
+        super().__init__(**kwargs)
         self._trained = False
         self._num_classes = num_classes
         self._class_weight = class_weight
@@ -112,14 +114,16 @@ class DeepClassifier(DeepModelTrainMixin):
         self._embed_size = embed_size
         self._vocab = vocab
         self._embed_weight = embed_weight
+        self._label2idx = label2idx
 
-        self._label2idx = None
-
-    def _build_net(self):
-        """
-        Implement this function to build net.
-        """
-        raise NotImplementedError('build net is not implemented.')
+        self.meta = {
+            'num_classes': self._num_classes,
+            'class_weight': self._class_weight,
+            'is_multilabel': self._is_multilabel,
+            'label2idx': self._label2idx,
+            'max_length': self._max_length,
+            'segmenter': self._segmenter,
+            'embed_size': self._embed_size}
 
     def _build(self):
         self._build_net()
@@ -130,13 +134,14 @@ class DeepClassifier(DeepModelTrainMixin):
         self._trainable = [self._net]
         self._initialize_net()
 
-    def _initialize_net(self):
-        self._net.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        self._loss.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        if self._embed_weight is not None:
-            self._net.embedding_layer.weight.set_data(self._embed_weight)
-        self._net.hybridize()
-        self._loss.hybridize()
+    def _get_or_build_dataset(self, dataset, X, y):
+        assert (X and y) or dataset
+        if dataset:
+            return dataset
+        return self._SimpleClassifyDataset(X, y, vocab=self._vocab,
+                                           label2idx=self._label2idx,
+                                           segmenter=self._segmenter,
+                                           max_length=self._max_length)
 
     def _decode(self, x, threshold=0.5):
         return _decode(x, is_binary=self._num_classes == 2,
@@ -176,78 +181,6 @@ class DeepClassifier(DeepModelTrainMixin):
         return gluonnlp.data.batchify.Tuple(
             Pad(axis=0, pad_val=1), Pad(axis=0),
             gluonnlp.data.batchify.Stack())
-
-    def _build_dataloader(self, dataset, batch_size, shuffle, last_batch):
-        return mx.gluon.data.DataLoader(dataset=dataset,
-                                        batch_size=batch_size,
-                                        shuffle=shuffle,
-                                        last_batch=last_batch,
-                                        batchify_fn=self._batchify_fn)
-
-    def _get_or_build_dataset(self, dataset, X, y):
-        assert (X and y) or dataset
-        if dataset:
-            return dataset
-        return _SimpleClassifyDataset(X, y, vocab=self._vocab,
-                                      label2idx=self._label2idx,
-                                      segmenter=self._segmenter,
-                                      max_length=self._max_length)
-
-    def fit(self, X=None, y=None, train_dataset=None,
-            valid_X=None, valid_y=None, valid_dataset=None,
-            batch_size=32, last_batch='keep',
-            update_embedding=True, n_epochs=15,
-            optimizer='adam', lr=3e-4, clip=5.0, verbose=True,
-            checkpoint=None, save_frequency=1):
-        """
-        Fit model.
-
-        Parameters:
-        ----
-        train_dataset: list of tuples
-          Each tuple is a (text, tags) pair.
-        valid_dataset: list of tuples
-          Each tuple is a (text, tags) pair. If None, valid log will be ignored
-        cut_func: function
-          Function used to segment text.
-        n_epochs: int
-          Number of training epochs
-        optimizer: str
-          Optimizers in mxnet.
-        lr: float
-          Start learning rate.
-        clip: float
-          Normal clip.
-        verbose:
-          If true, training loss and validation score will be logged.
-        checkpoint: str
-          If not None, save model using `checkpoint` as prefix.
-        save_frequency: int
-          If checkpoint is not None, save model every `save_frequency` epochs.
-        """
-        train_dataset = self._get_or_build_dataset(train_dataset, X, y)
-        print(train_dataset.label2idx)
-        assert self._num_classes == len(train_dataset.label2idx)
-
-        self.idx2labels = train_dataset.idx2labels
-        if self._vocab is None:
-            self._vocab = train_dataset.vocab
-            self._build()
-        if self._label2idx is None:
-            self._label2idx = train_dataset.label2idx
-
-        if valid_X and valid_y and valid_dataset is None:
-            valid_dataset = self._get_or_build_dataset(train_dataset, X, y)
-
-        if not update_embedding:
-            self._net.embedding_layer.weight.grad_req = 'null'
-
-        dataloader = self._build_dataloader(train_dataset, batch_size,
-                                            True, last_batch)
-        self._fit(dataloader, lr, n_epochs,
-                  valid_dataset=valid_dataset,
-                  optimizer=optimizer, clip=clip, verbose=verbose,
-                  checkpoint=checkpoint, save_frequency=save_frequency)
 
     def predict(self, X=None, dataset=None, batch_size=512,
                 return_origin_label=True):
@@ -289,24 +222,63 @@ class DeepClassifier(DeepModelTrainMixin):
             return precision_recall_fscore_support(
                 y, predictions, labels=list(range(self._num_classes)))
 
+    def save_model(self, file_path: str) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with open(os.path.join(temp_dir, 'vocab.json'), 'w') as f:
+                f.write(self._vocab.to_json())
+            with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
+                f.write(json.dumps(self.meta, ensure_ascii=False))
+            for i, item in enumerate(self._trainable):
+                item.export(os.path.join(temp_dir, f'hybrid-{0:02}'))
+                item.save_parameters(os.path.join(temp_dir, f'{i:02}-params'))
+            shutil.make_archive(file_path, 'gztar', temp_dir)
+
+    @classmethod
+    def load_model(cls, file_path, ctx=mx.cpu()):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            shutil.unpack_archive(file_path, temp_dir, 'gztar')
+            with open(os.path.join(temp_dir, 'vocab.json')) as f:
+                vocab = gluonnlp.Vocab.from_json(f.read())
+            with open(os.path.join(temp_dir, 'meta.json')) as f:
+                meta = json.loads(f.read())
+
+            meta['ctx'] = ctx
+            meta['vocab'] = vocab
+            clf = cls(**meta)
+            for i, block in enumerate(clf._trainable):
+                block.load_parameters(os.path.join(temp_dir, f'{i:02}-params'),
+                                      ctx=ctx)
+        clf._trained = True
+        return clf
+
 
 class TextCNNClassifier(DeepClassifier):
 
-    def __init__(self, num_classes, is_multilabel=False,
-                 ctx=mx.cpu(), vocab=None, embed_weight=None,
-                 segmenter=word_cut_func, max_length=100, embed_size=100,
-                 num_filters=(25, 50, 75, 100),
-                 ngram_filter_sizes=(1, 2, 3, 4),
-                 conv_layer_activation='tanh', dropout=0.5, num_highway=1):
-        super().__init__(num_classes, is_multilabel=is_multilabel, ctx=ctx,
-                         vocab=vocab, embed_weight=embed_weight,
+    def __init__(self, num_classes=2, class_weight=None,
+                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
+                 vocab=None, embed_weight=None, segmenter='jieba',
+                 max_length=100, embed_size=100,
+                 num_filters=(25, 50, 75, 100, 125, 150),
+                 ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
+                 conv_layer_activation='tanh', dropout=0.5,
+                 num_highway=1, **kwargs):
+        super().__init__(num_classes=num_classes, class_weight=class_weight,
+                         is_multilabel=is_multilabel, label2idx=label2idx,
+                         ctx=ctx, vocab=vocab, embed_weight=embed_weight,
                          segmenter=segmenter, max_length=max_length,
-                         embed_size=embed_size)
+                         embed_size=embed_size, **kwargs)
         self._num_filters = num_filters
         self._ngram_filter_sizes = ngram_filter_sizes
         self._conv_layer_activation = conv_layer_activation
         self._dropout = dropout
         self._num_highway = num_highway
+
+        self.meta.update({
+            'num_filters': list(self._num_filters),
+            'ngram_filter_sizes': list(self._ngram_filter_sizes),
+            'conv_layer_activation': self._conv_layer_activation,
+            'dropout': self._dropout,
+            'num_highway': self._num_highway})
 
         if vocab is not None:
             self._build()
@@ -323,18 +295,7 @@ class TextCNNClassifier(DeepClassifier):
                     dropout=self._dropout,
                     num_highway=self._num_highway,
                     prefix='encode_'))
-        self.meta = {
-            'num_classes': self._num_classes,
-            'is_multilabel': self._is_multilabel,
-            'label2idx': self._label2idx,
-            'vocab_size': len(self._vocab),
-            'embed_size': self._embed_size,
-            'max_length': self._max_length,
-            'num_filters': list(self._num_filters),
-            'ngram_filter_sizes': list(self._ngram_filter_sizes),
-            'conv_layer_activation': self._conv_layer_activation,
-            'dropout': self._dropout,
-            'num_highway': self._num_highway}
+        self.meta.update({'vocab_size': len(self._vocab)})
 
     @property
     def _batchify_fn(self):
@@ -343,48 +304,30 @@ class TextCNNClassifier(DeepClassifier):
             Pad(axis=0, min_length=max(self._ngram_filter_sizes)),
             gluonnlp.data.batchify.Stack())
 
-    @classmethod
-    def load_model(cls, vocab_file, meta_file, model_file,
-                   segmenter=word_cut_func, ctx=mx.cpu()):
-        with open(vocab_file) as f:
-            vocab = gluonnlp.Vocab.from_json(f.read())
-        with open(meta_file) as f:
-            meta = json.loads(f.read())
-
-        clf = cls(meta['num_classes'],
-                  is_multilabel=meta['is_multilabel'],
-                  ctx=mx.cpu(),
-                  vocab=vocab,
-                  segmenter=segmenter,
-                  max_length=meta['max_length'],
-                  embed_size=meta['embed_size'],
-                  num_filters=meta['num_filters'],
-                  ngram_filter_sizes=meta['ngram_filter_sizes'],
-                  conv_layer_activation=meta['conv_layer_activation'],
-                  dropout=meta['dropout'],
-                  num_highway=meta['num_highway'])
-        clf._label2idx = meta['label2idx']
-        for filename, block in zip(model_file, clf._trainable):
-            block.load_parameters(filename, ctx=ctx)
-        clf._trained = True
-        return clf
-
 
 class TextRNNClassifier(DeepClassifier):
 
-    def __init__(self, num_classes, is_multilabel=False,
-                 ctx=mx.cpu(), vocab=None, embed_weight=None,
-                 segmenter=word_cut_func, max_length=100, embed_size=100,
+    def __init__(self, num_classes=2, class_weight=None,
+                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
+                 vocab=None, embed_weight=None, segmenter='jieba',
+                 max_length=100, embed_size=100,
                  hidden_size=512, num_rnn_layers=1, output_size=1,
-                 dropout=0.5, dense_connection='last'):
-        super().__init__(num_classes, is_multilabel=is_multilabel, ctx=ctx,
-                         vocab=vocab, embed_weight=embed_weight,
+                 dropout=0.5, dense_connection='last', **kwargs):
+        super().__init__(num_classes=num_classes, class_weight=class_weight,
+                         is_multilabel=is_multilabel, label2idx=label2idx,
+                         ctx=ctx, vocab=vocab, embed_weight=embed_weight,
                          segmenter=segmenter, max_length=max_length,
-                         embed_size=embed_size)
+                         embed_size=embed_size, **kwargs)
         self._hidden_size = hidden_size
         self._num_rnn_layers = num_rnn_layers
         self._dropout = dropout
         self._dense_connection = dense_connection
+
+        self.meta.update({
+            'hidden_size': hidden_size,
+            'num_rnn_layers': num_rnn_layers,
+            'dropout': dropout,
+            'dense_connection': dense_connection})
 
         if vocab is not None:
             self._build()
@@ -399,36 +342,4 @@ class TextRNNClassifier(DeepClassifier):
                     dense_connection=self._dense_connection,
                     output_size=self._num_classes,
                     prefix='encode_'))
-        self.meta = {
-            'num_classes': self._num_classes,
-            'is_multilabel': self._is_multilabel,
-            'max_length': self._max_length,
-            'vocab_size': len(self._vocab),
-            'embed_size': self._embed_size,
-            'hidden_size': self._hidden_size,
-            'num_rnn_layers': self._num_rnn_layers,
-            'dropout': self._dropout,
-            'dense_connection': self._dense_connection}
-
-    @classmethod
-    def load_model(cls, vocab_file, meta_file, model_file,
-                   segmenter=word_cut_func, ctx=mx.cpu()):
-        with open(vocab_file) as f:
-            vocab = gluonnlp.Vocab.from_json(f.read())
-        with open(meta_file) as f:
-            meta = json.loads(f.read())
-        clf = cls(meta['num_classes'],
-                  is_multilabel=meta['is_multilabel'],
-                  ctx=mx.cpu(),
-                  vocab=vocab,
-                  segmenter=segmenter,
-                  max_length=meta['max_length'],
-                  embed_size=meta['embed_size'],
-                  hidden_size=meta['hidden_size'],
-                  num_rnn_layers=meta['num_rnn_layers'],
-                  output_size=meta['num_classes'],
-                  dropout=meta['dropout'],
-                  dense_connection=meta['dense_connection'])
-        for filename, block in zip(model_file, clf._trainable):
-            block.load_parameters(filename, ctx=ctx)
-        return clf
+        self.meta.update({'vocab_size': len(self._vocab)})
