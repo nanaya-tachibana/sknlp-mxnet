@@ -1,3 +1,4 @@
+import time
 import functools
 import itertools
 
@@ -52,13 +53,13 @@ class DeepTagger(DeepModel):
         self._initialize_net()
 
     def _get_or_build_dataset(self, dataset, X, y):
-        assert (X and y) or dataset
+        assert (X is not None and y is not None) or dataset is not None
         if dataset:
             return dataset
-        return self._SimpleSequenceTagDataset(X, y, vocab=self._vocab,
-                                              label2idx=self._label2idx,
-                                              segmenter=self._segmenter,
-                                              max_length=self._max_length)
+        return _SimpleSequenceTagDataset(X, y, vocab=self._vocab,
+                                         label2idx=self._label2idx,
+                                         segmenter=self._segmenter,
+                                         max_length=self._max_length)
 
     def _valid_log(self, valid_dataset):
         self._decode = self._create_decoder(
@@ -78,8 +79,7 @@ class DeepTagger(DeepModel):
     def _create_decoder(self, transitions):
 
         def decoder(inputs, mask=None):
-            vd = functools.partial(viterbi_decode, transitions)
-            return vd(inputs, mask=mask)
+            return viterbi_decode(transitions, inputs, mask=mask)
 
         return decoder
 
@@ -93,7 +93,6 @@ class DeepTagger(DeepModel):
                 return_origin_label=True):
         assert self._trained
         assert dataset or X
-
         if dataset is None:
             dataset = self._get_or_build_dataset(dataset, X, ['O'] * len(X))
         self.idx2labels = dataset.idx2labels
@@ -103,13 +102,12 @@ class DeepTagger(DeepModel):
         for (batch_inputs, batch_mask, _) in dataloader:
             batch_inputs = batch_inputs.as_in_context(self._ctx)
             batch_mask = batch_mask.as_in_context(self._ctx)
-
             logits = self._net(batch_inputs.transpose(axes=(1, 0)))
             predictions.extend(
                 self._decode(logits.asnumpy(),
                              batch_mask.transpose(axes=(1, 0)).asnumpy()))
         if return_origin_label:
-            return self._decode_label(predictions)
+            return [self.idx2labels(idx) for idx in predictions]
         return predictions
 
     def score(self, X=None, y=None, dataset=None, batch_size=512):

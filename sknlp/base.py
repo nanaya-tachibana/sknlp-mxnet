@@ -1,10 +1,8 @@
-import json
 import logging
 
 import mxnet as mx
 
 from .logger import logger, stream_log, file_log
-from .data import _SimpleClassifyDataset
 
 
 class BaseModel:

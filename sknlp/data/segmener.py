@@ -1,4 +1,5 @@
 import jieba_fast as jieba
+jieba.lcut('我们')
 
 
 class Segmenter:
@@ -13,7 +14,6 @@ class Segmenter:
 
     def __init__(self, method: str = None) -> None:
         if method == 'jieba':
-            jieba.lcut('我们')
             self._method = jieba.lcut
         else:
             self._method = list

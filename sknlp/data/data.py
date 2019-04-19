@@ -165,7 +165,6 @@ class NLPDatasetMixin:
         self.vocab = vocab
         self.label2idx = label2idx
         cutter = Segmenter(segmenter)
-        print(cutter.cut('我们'))
         self._segmenter = cutter.cut
         self._encode = encode
         self._max_length = max_length
@@ -266,9 +265,17 @@ class _SimpleClassifyDataset(ClassifyDatasetMixin, InMemoryDataset):
                          max_length=max_length)
 
 
-class _SimpleSequenceTagDataset(_SimpleClassifyDataset,
-                                SequenceTagDatasetMixin):
-    pass
+class _SimpleSequenceTagDataset(SequenceTagDatasetMixin, InMemoryDataset):
+
+    def __init__(self, text_list, label_list, vocab=None, label2idx=None,
+                 segmenter=None, encode=None, max_length=100):
+        super().__init__(text_list=text_list,
+                         label_list=label_list,
+                         vocab=vocab,
+                         label2idx=label2idx,
+                         segmenter=segmenter,
+                         encode=encode,
+                         max_length=max_length)
 
 
 DATASET_DIR = 'datasets'

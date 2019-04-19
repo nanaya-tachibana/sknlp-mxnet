@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 import gluonnlp
 from gensim.models import KeyedVectors
@@ -29,8 +30,8 @@ class Vocab(gluonnlp.Vocab):
         """
         embed = KeyedVectors.load_word2vec_format(file_path, binary=binary)
         counter = gluonnlp.data.count_tokens(embed.vocab.keys())
-        vocab = gluonnlp.Vocab(counter)
+        vocab = cls(counter)
         embed_weight = embed[vocab.idx_to_token[4:]]
-        embed_weight = np.concatenate(np.zeros((4, embed_weight.shape[1])),
-                                      embed_weight, axis=0)
+        embed_weight = np.concatenate([
+            np.zeros((4, embed_weight.shape[1])), embed_weight], axis=0)
         return vocab, embed_weight

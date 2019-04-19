@@ -1,6 +1,8 @@
-from sknlp.classifier import TextCNNClassifier, TextRNNClassifier
-from sknlp.dataset import load_waimai_dataset, load_intent_dataset
+from sknlp.classifier import TextCNNClassifier
+from sknlp.data import (load_msra_dataset, load_intent_dataset,
+                        load_waimai_dataset)
 from sklearn.metrics import precision_recall_fscore_support
+from sknlp.tagger import TextRNNTagger
 
 
 def multi2single(intents):
@@ -46,20 +48,26 @@ if __name__ == '__main__':
     # clf.fit(train_dataset=train, valid_dataset=test, n_epochs=60, checkpoint='dev/word')
     for i in range(20, 21):
         print(f'----------------------------------------model {i:02}')
-        clf = TextCNNClassifier.load_model('dev/word-vocab.json', 'dev/word-meta.json',
-                                           (f'dev/word-0-00{i:02}-params', ))
-        # scores = clf.score(dataset=test)
-        # for l, p, r, f, _ in zip(
-        #         clf.idx2labels(list(range(clf._num_classes))), *scores):
-        #     print(f'label: {l} {f * 100}({p * 100}, {r * 100})')
-        # print('-------------------------------')
+        clf = TextCNNClassifier.load_model('test.tar.gz')
+        scores = clf.score(dataset=test)
+        for l, p, r, f, _ in zip(
+                clf.idx2labels(list(range(clf._num_classes))), *scores):
+            print(f'label: {l} {f * 100}({p * 100}, {r * 100})')
+        print('-------------------------------')
 
-        # predictions = [multi2single(p) for p in clf.predict(dataset=test)]
-        # y = [multi2single(intent)
-        #      for intent in clf._decode_label(clf._debinarize([labels for _, _, labels in test]))]
-        # labels = list(set(y))
-        # scores = precision_recall_fscore_support(y, predictions, labels=labels)
-        # for l, p, r, f, _ in zip(labels, *scores):
-        #     print(f'label: {l} {f * 100}({p * 100}, {r * 100})')
-        # print(precision_recall_fscore_support(y, predictions, average='micro'))
-        print(clf.predict(dataset=test))
+        predictions = [multi2single(p) for p in clf.predict(dataset=test)]
+        y = [multi2single(intent)
+             for intent in clf._decode_label(clf._debinarize([labels for _, _, labels in test]))]
+        labels = list(set(y))
+        scores = precision_recall_fscore_support(y, predictions, labels=labels)
+        for l, p, r, f, _ in zip(labels, *scores):
+            print(f'label: {l} {f * 100}({p * 100}, {r * 100})')
+        print(precision_recall_fscore_support(y, predictions, average='micro'))
+        # clf.save_model('test')
+    # train, test = load_msra_dataset(segmenter=None)
+    # print(len(train), len(test), len(train.label2idx))
+    # # print(train.label2idx)
+    # # clf = TextRNNTagger(len(train.label2idx))
+    # # clf.fit(train_dataset=train, valid_dataset=test, n_epochs=60, checkpoint='dev/tagger')
+    # clf = TextRNNTagger.load_model('dev/tagger.tar.gz')
+    # print(clf.score(dataset=test))

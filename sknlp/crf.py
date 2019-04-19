@@ -311,10 +311,10 @@ if __name__ == '__main__':
         [-0.0747, -0.0884, -0.0698, 0.0517, -0.0683],
         [0.0845, -0.0411, -0.0849, -0.0357, -0.0408],
         [0.0506, -0.0526, -0.0175, -0.0538, 0.0537]]))
-    assert abs(m(emissions, tags, mask).sum().asscalar() -
-               (-8.493363)) <= 1e-4
-    assert abs(m(emissions, tags, mx.nd.ones_like(tags)).sum().asscalar() -
-               (-13.35252)) <= 1e-4
+    assert abs(m(emissions, tags, mask).sum().asscalar()
+               - (-8.493363)) <= 1e-4
+    assert abs(m(emissions, tags, mx.nd.ones_like(tags)).sum().asscalar()
+               - (-13.35252)) <= 1e-4
 
     with mx.autograd.record():
         loss = m(emissions, tags, mask)
