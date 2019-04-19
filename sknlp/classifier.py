@@ -138,10 +138,10 @@ class DeepClassifier(DeepModel):
         assert (X and y) or dataset
         if dataset:
             return dataset
-        return self._SimpleClassifyDataset(X, y, vocab=self._vocab,
-                                           label2idx=self._label2idx,
-                                           segmenter=self._segmenter,
-                                           max_length=self._max_length)
+        return _SimpleClassifyDataset(X, y, vocab=self._vocab,
+                                      label2idx=self._label2idx,
+                                      segmenter=self._segmenter,
+                                      max_length=self._max_length)
 
     def _decode(self, x, threshold=0.5):
         return _decode(x, is_binary=self._num_classes == 2,
