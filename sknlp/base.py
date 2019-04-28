@@ -2,27 +2,34 @@ import logging
 
 import mxnet as mx
 
-from .logger import logger, stream_log, file_log
+
+logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.WARNING)
 
 
 class BaseModel:
 
     def __init__(self, **kwargs):
         self.logger = logger
-        self.stream_log = stream_log
-        self.file_log = file_log
 
-    def _fit(self, train_dataloader, lr, n_epochs,
-             valid_dataset=None,
-             optimizer='adam', update_steps_lr=500,
-             factor=1, stop_factor_lr=2e-6, clip=5,
-             verbose=True, checkpoint=None, save_frequency=1):
+    def _fit(self, train_dataloader: mx.gluon.data.DataLoader,
+             valid_dataloader: mx.gluon.data.DataLoader = None,
+             lr: float = 0.01,
+             n_epochs: int = 10,
+             optimizer: str = 'adam',
+             update_steps_lr: int = 500,
+             factor: float = 1,
+             stop_factor_lr: float = 2e-6,
+             clip: float = 5,
+             verbose: bool = True,
+             checkpoint: str = None,
+             save_frequency: int = 1):
         """
         Help function for model fitting.
 
         Parameters:
-        ----
-        train_dataset: list of tuples
+        ----------
+        train_dataloader: list of tuples
           Each tuple is a (text, tags) pair.
         valid_dataset: list of tuples
           Each tuple is a (text, tags) pair. If None, valid log will be ignored
@@ -51,8 +58,6 @@ class BaseModel:
         """
         if verbose:
             self.logger.setLevel(level=logging.INFO)
-            self.stream_log.setLevel(level=logging.INFO)
-            self.file_log.setLevel(level=logging.INFO)
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
 
@@ -226,8 +231,9 @@ class DeepModel(BaseModel):
         if not update_embedding:
             self._net.embedding_layer.weight.grad_req = 'null'
 
-        dataloader = self._build_dataloader(train_dataset, batch_size,
-                                            True, last_batch)
+        train_dataloader = self._build_dataloader(train_dataset, batch_size,
+                                                  True, last_batch)
+        valid_dataloader = self._build_dataloader(valid_dataset
         self._fit(dataloader, lr, n_epochs,
                   valid_dataset=valid_dataset,
                   optimizer=optimizer, clip=clip, verbose=verbose,

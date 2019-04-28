@@ -1,5 +1,5 @@
 import os
-from typing import IO, Optional
+from typing import IO, List, Dict, Tuple
 
 from multiprocessing import current_process
 import collections
@@ -21,13 +21,13 @@ from .segmener import Segmenter
 
 class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
     """
-    Indexed `RecordIO` data format, 支持随机存取.
+    Indexed ``RecordIO`` data format, supporting random access.
 
     Examples
     ---------
     record = SimpleIndexedRecordIO('tmp.idx', 'tmp.rec', 'w')
     >>> for i in range(5):
-    ...    d = 'record_%d' % i
+    ...    d = f'record_{i}'
     ...    record.write(d.encode('utf-8'))
     >>> record.close()
     >>> record = SimpleIndexedRecordIO('tmp.idx', 'tmp.rec', 'r')
@@ -36,23 +36,21 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
 
     Parameters
     ----------
-    idx_path: `str`
-        index文件路径
-    uri: `str`
-        record文件路径, 仅支持seekable文件类型
-    flag: `str`
-        'w'(写)或者'r'(读)
+    idx_path: ``str``
+        Path to the index file of ``RecordIO`` file.
+    uri: ``str``
+        Path to ``RecordIO`` file.
+    flag: ``str``
+        'w' for write or 'r' for read.
     """
 
     def __init__(self, idx_path: str, uri: str, flag: str) -> None:
-        self.idx_path = idx_path
-        self.flag = flag
+        self.positions = np.array([], dtype=np.uint)
         super().__init__(idx_path, uri, flag)
-        self.fidx: IO = open(self.idx_path, self.flag)  # 兼容父类close方法
 
     def open(self) -> None:
         """
-
+        打开``RecordIO``文件
         """
         if self.flag == "w":
             check_call(_LIB.MXRecordIOWriterCreate(self.uri,
@@ -66,8 +64,10 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
             raise ValueError("Invalid flag %s" % self.flag)
         self.pid = current_process().pid
         self.is_open = True
+        self.fidx: IO = open(self.idx_path, self.flag)  # 兼容父类close方法
         if not self.writable:
-            self.positions = pd.read_csv(self.idx_path, header=None)[0].values
+            self.positions = pd.read_csv(self.idx_path,
+                                         header=None, dtype=np.uint)[0].values
 
     def seek(self, idx: int) -> None:
         """
@@ -84,127 +84,123 @@ class SimpleIndexedRecordIO(mx.recordio.MXIndexedRecordIO):
 
     def write(self, buf: bytes) -> None:
         """
-        Inserts input record.
+        Write ``buf`` sequentially.
 
         Examples
         ---------
         >>> for i in range(5):
-        ...     record.write('record_%d'%i)
+        ...     record.write(f'record_{i}'.encode('utf-8'))
         >>> record.close()
 
         Parameters
         ----------
-        idx : int
-            Index of a file.
-        buf : byte
+        buf: ``byte``
             Record to write.
         """
         pos = self.tell()
         super().write(buf)
-        self.fidx.write('%d\n' % pos)
+        self.fidx.write(f'{pos}\n')
 
 
 class RecordFileDataset(Dataset):
     """
-    A dataset wrapper for a RecordIO (.rec) file.
+    A dataset wrapper for a ``SimpleIndexedRecordIO`` file.
 
     Each sample is a string representing the raw content of an record.
 
     Parameters
     ----------
-    filename : str
-        Path to rec file.
+    filename : ``str``
+        Path to ``RecordIO`` file.
     """
 
-    def __init__(self, filename):
+    def __init__(self, filename: str, encode: str = 'utf-8') -> None:
         self.idx_file = os.path.splitext(filename)[0] + '.idx'
         self.filename = filename
+        self._encode = encode
         self._record = SimpleIndexedRecordIO(self.idx_file, self.filename, 'r')
 
-    def __getitem__(self, idx):
-        return self._record.read_idx(idx)
+    def __getitem__(self, idx: int) -> str:
+        return self._record.read_idx(idx).decode('utf-8')
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._record.positions)
 
 
 class InMemoryDataset(Dataset):
     """
     A dataset wrapper for lists.
-
-
-    Parameters
-    ----------
-    text_list: list
-        List of text.
-    label_list: list
-        List of label
     """
 
-    def __init__(self, text_list, label_list):
-        self._record = ['\t'.join([text, label])
-                        for text, label in zip(text_list, label_list)]
+    def __init__(self, *args: List[List[str]]) -> None:
+        self._record = ['\t'.join(tuples) for tuples in zip(*args)]
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> str:
         return self._record[idx]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._record)
 
 
 class NLPDatasetMixin:
     """
-    A dataset mixin which implements basic preprocess for NLP data.
+    Mixin class实现了基本的NLP预处理, 来预处理``Dataset``.
 
-    Always used with a `Dataset`.
+    Parameters
+    ----------
+    vocab: gluonnlp.Vocab, optional
+        词汇表, 如果为None, 会根据数据集构建
+
     """
 
-    def __init__(self, vocab=None, label2idx=None, segmenter=None,
-                 encode='utf-8', max_length=100, **kwargs):
+    def __init__(self, vocab: gluonnlp.Vocab = None,
+                 label2idx: Dict[str, int] = None,
+                 segmenter: str = None,
+                 max_length: int = 100,
+                 **kwargs) -> None:
         super().__init__(**kwargs)
-        self.vocab = vocab
-        self.label2idx = label2idx
         cutter = Segmenter(segmenter)
         self._segmenter = cutter.cut
-        self._encode = encode
         self._max_length = max_length
 
-        if self.label2idx is None or self.vocab is None:
+        if label2idx is None or vocab is None:
             counter = collections.Counter()
             label_set = set()
             for i in range(super().__len__()):
                 row = super().__getitem__(i)
-                if self._encode is not None:
-                    row = row.decode(self._encode)
                 text, label = row.split('\t')
-                if self.vocab is None:
+                if vocab is None:
                     counter.update(self._segmenter(text))
-                if self.label2idx is None:
+                if label2idx is None:
                     labels = label.split('|')
                     label_set.update(labels)
-        if self.vocab is None:
+        if vocab is None:
             self.vocab = gluonnlp.Vocab(counter)
-        if self.label2idx is None:
+        else:
+            self.vocab = vocab
+        if label2idx is None:
             label_set.discard('')
             label_list = list(label_set)
             label_list.sort()
             self.label2idx = dict(zip(label_list, range(len(label_set))))
+        else:
+            self.label2idx = label2idx
         self._idx2label = {v: k for k, v in self.label2idx.items()}
 
-    def _preprocess_text(self, text):
+    def _preprocess_text(self, text: str) -> List[int]:
         return self.vocab[self._segmenter(text[:self._max_length])]
 
-    def _preprocess_label(self, label):
+    def _preprocess_label(self, label: str) -> List[int]:
         return [self.label2idx[l] for l in label.split('|')]
 
-    def _preprocess_func(self, row):
-        if self._encode is not None:
-            row = row.decode('utf-8')
+    def _preprocess_func(self, row: str) -> Tuple[List[int],
+                                                  List[int],
+                                                  List[int]]:
         text, label = row.split('\t')
-        text = self._preprocess_text(text)
-        label = self._preprocess_label(label)
-        mask = np.ones(len(text), dtype=np.float32)
-        return text, mask, label
+        processed_text = self._preprocess_text(text)
+        processed_label = self._preprocess_label(label)
+        mask = [1] * len(text)
+        return processed_text, mask, processed_label
 
     def idx2tokens(self, idx_list):
         return self.vocab.to_tokens(idx_list)
