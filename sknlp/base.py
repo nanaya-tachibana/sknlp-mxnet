@@ -61,8 +61,8 @@ class BaseModel:
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
 
-        assert (getattr(self, '_trainable', None) is not None
-                and len(self._trainable) > 0), 'No trainable parameters'
+        assert (getattr(self, '_trainable', None) is not None and
+                len(self._trainable) > 0), 'No trainable parameters'
 
         params_dict = self._get_trainable_params()
         trainer = mx.gluon.Trainer(params_dict,
@@ -231,9 +231,8 @@ class DeepModel(BaseModel):
         if not update_embedding:
             self._net.embedding_layer.weight.grad_req = 'null'
 
-        train_dataloader = self._build_dataloader(train_dataset, batch_size,
-                                                  True, last_batch)
-        valid_dataloader = self._build_dataloader(valid_dataset
+        dataloader = self._build_dataloader(train_dataset, batch_size,
+                                            True, last_batch)
         self._fit(dataloader, lr, n_epochs,
                   valid_dataset=valid_dataset,
                   optimizer=optimizer, clip=clip, verbose=verbose,
