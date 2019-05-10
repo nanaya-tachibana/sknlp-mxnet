@@ -205,12 +205,16 @@ class DeepClassifier(DeepModel):
         return self.idx2labels(idx)
 
     def _valid_log(self, valid_dataset):
-        scores = self.score(dataset=valid_dataset)
+        s = self.score(dataset=valid_dataset)
         if self._is_multilabel or self._num_classes > 2:
+            scores, avg_score = s
             for l, p, r, f, _ in zip(self.idx2labels(
                     list(range(self._num_classes))), *scores):
                 self.logger.info(f'label: {l} precision: {p}, '
                                  f'recall: {r}, f1: {f}')
+            p, r, f = avg_score
+            self.logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
+                             f'{round(r * 100, 2)})')
         else:
             p, r, f, _ = scores
             self.logger.info(f'precision: {p}, recall: {r}, f1: {f}')
