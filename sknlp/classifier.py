@@ -212,7 +212,7 @@ class DeepClassifier(DeepModel):
                     list(range(self._num_classes))), *scores):
                 self.logger.info(f'label: {l} precision: {p}, '
                                  f'recall: {r}, f1: {f}')
-            p, r, f = avg_score
+            p, r, f, _ = avg_score
             self.logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
                              f'{round(r * 100, 2)})')
         else:
