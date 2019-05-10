@@ -114,10 +114,9 @@ class RecordFileDataset(Dataset):
         Path to ``RecordIO`` file.
     """
 
-    def __init__(self, filename: str, encode: str = 'utf-8') -> None:
+    def __init__(self, filename: str) -> None:
         self.idx_file = os.path.splitext(filename)[0] + '.idx'
         self.filename = filename
-        self._encode = encode
         self._record = SimpleIndexedRecordIO(self.idx_file, self.filename, 'r')
 
     def __getitem__(self, idx: int) -> str:
@@ -132,8 +131,10 @@ class InMemoryDataset(Dataset):
     A dataset wrapper for lists.
     """
 
-    def __init__(self, *args: List[List[str]]) -> None:
-        self._record = ['\t'.join(tuples) for tuples in zip(*args)]
+    def __init__(self, text_list, label_list) -> None:
+        self._record = [
+            '\t'.join([t, l]) for t, l in zip(text_list, label_list)
+        ]
 
     def __getitem__(self, idx: int) -> str:
         return self._record[idx]
@@ -163,29 +164,37 @@ class NLPDatasetMixin:
         self._segmenter = cutter.cut
         self._max_length = max_length
 
-        if label2idx is None or vocab is None:
-            counter = collections.Counter()
-            label_set = set()
-            for i in range(super().__len__()):
-                row = super().__getitem__(i)
-                text, label = row.split('\t')
-                if vocab is None:
-                    counter.update(self._segmenter(text))
-                if label2idx is None:
-                    labels = label.split('|')
-                    label_set.update(labels)
+        n_samples = super().__len__()
+        token_counter = collections.Counter()
+        label_counter = collections.Counter()
+        for i in range(n_samples):
+            row = super().__getitem__(i)
+            text, label = row.split('\t')
+            if vocab is None:
+                token_counter.update(self._segmenter(text))
+            if label2idx is None:
+                labels = label.split('|')
+                label_counter.update(labels)
         if vocab is None:
-            self.vocab = gluonnlp.Vocab(counter)
+            self.vocab = gluonnlp.Vocab(token_counter)
         else:
             self.vocab = vocab
         if label2idx is None:
-            label_set.discard('')
-            label_list = list(label_set)
+            if '' in label_counter:
+                del label_counter['']
+            label_list = list(label_counter.keys())
             label_list.sort()
-            self.label2idx = dict(zip(label_list, range(len(label_set))))
+            self.label2idx = dict(zip(label_list, range(len(label_list))))
         else:
             self.label2idx = label2idx
         self._idx2label = {v: k for k, v in self.label2idx.items()}
+
+        self.label_weights = [0] * len(self.label2idx)
+        for label in label_counter:
+            idx = self.label2idx[label]
+            self.label_weights[idx] = max(
+                1, 1 / (n_samples / label_counter[label] - 1)
+            )
 
     def _preprocess_text(self, text: str) -> List[int]:
         return self.vocab[self._segmenter(text[:self._max_length])]
@@ -199,7 +208,7 @@ class NLPDatasetMixin:
         text, label = row.split('\t')
         processed_text = self._preprocess_text(text)
         processed_label = self._preprocess_label(label)
-        mask = [1] * len(text)
+        mask = [1] * len(processed_text)
         return processed_text, mask, processed_label
 
     def idx2tokens(self, idx_list):
@@ -212,11 +221,8 @@ class NLPDatasetMixin:
 
 class ClassifyDatasetMixin(NLPDatasetMixin):
 
-    def __init__(self, vocab=None, label2idx=None, segmenter=None,
-                 encode='utf-8', max_length=100, **kwargs):
-        super().__init__(vocab=vocab, label2idx=label2idx,
-                         segmenter=segmenter, encode=encode,
-                         max_length=max_length, **kwargs)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self._binarizer = MultiLabelBinarizer([
             self._idx2label[i] for i in range(len(self.label2idx))])
 
@@ -251,26 +257,24 @@ class _SimpleClassifyDataset(ClassifyDatasetMixin, InMemoryDataset):
     """
 
     def __init__(self, text_list, label_list, vocab=None, label2idx=None,
-                 segmenter=None, encode=None, max_length=100):
+                 segmenter=None, max_length=100):
         super().__init__(text_list=text_list,
                          label_list=label_list,
                          vocab=vocab,
                          label2idx=label2idx,
                          segmenter=segmenter,
-                         encode=encode,
                          max_length=max_length)
 
 
 class _SimpleSequenceTagDataset(SequenceTagDatasetMixin, InMemoryDataset):
 
     def __init__(self, text_list, label_list, vocab=None, label2idx=None,
-                 segmenter=None, encode=None, max_length=100):
+                 segmenter=None, max_length=100):
         super().__init__(text_list=text_list,
                          label_list=label_list,
                          vocab=vocab,
                          label2idx=label2idx,
                          segmenter=segmenter,
-                         encode=encode,
                          max_length=max_length)
 
 
@@ -282,14 +286,13 @@ class MsraDataset(SequenceTagDatasetMixin, RecordFileDataset):
     DIR = 'msra'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=None, encode='utf-8', max_length=100):
+                 segmenter=None, max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
                          vocab=vocab,
                          label2idx=label2idx,
                          segmenter=segmenter,
-                         encode=encode,
                          max_length=max_length)
 
 
@@ -298,14 +301,13 @@ class WaimaiDataset(ClassifyDatasetMixin, RecordFileDataset):
     DIR = 'waimai'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=None, encode='utf-8', max_length=100):
+                 segmenter=None, max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
                          vocab=vocab,
                          label2idx=label2idx,
                          segmenter=segmenter,
-                         encode=encode,
                          max_length=max_length)
 
 
@@ -314,14 +316,13 @@ class IntentDataset(ClassifyDatasetMixin, RecordFileDataset):
     DIR = 'intent'
 
     def __init__(self, is_train_file=True, vocab=None, label2idx=None,
-                 segmenter=None, encode='utf-8', max_length=100):
+                 segmenter=None, max_length=100):
         filename = 'train.rec' if is_train_file else 'test.rec'
         super().__init__(filename=os.path.join(DATASET_DIR, self.DIR,
                                                filename),
                          vocab=vocab,
                          label2idx=label2idx,
                          segmenter=segmenter,
-                         encode=encode,
                          max_length=max_length)
 
     def _preprocess_label(self, label):

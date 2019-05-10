@@ -1,5 +1,7 @@
 import jieba_fast as jieba
+from pyhanlp import *
 jieba.lcut('我们')
+HanLP.segment('你好')
 
 
 class Segmenter:
@@ -15,6 +17,8 @@ class Segmenter:
     def __init__(self, method: str = None) -> None:
         if method == 'jieba':
             self._method = jieba.lcut
+        elif method == 'hanlp':
+            self._method = lambda x: [s.word for s in HanLP.segment(x)]
         else:
             self._method = list
 

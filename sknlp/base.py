@@ -3,17 +3,26 @@ import logging
 import mxnet as mx
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(level=logging.WARNING)
+def _get_logger():
+    logger = logging.getLogger(__name__)
+    logger.setLevel(level=logging.WARNING)
+    stream_log = logging.StreamHandler()
+    stream_log.setLevel(level=logging.WARNING)
+    file_log = logging.FileHandler('train.log')
+    file_log.setLevel(level=logging.WARNING)
+    logger.addHandler(stream_log)
+    logger.addHandler(file_log)
+    return logger, stream_log, file_log
 
 
 class BaseModel:
 
     def __init__(self, **kwargs):
-        self.logger = logger
+        self.logger, self.stream_log, self.file_log = _get_logger()
+        self._trainable = []
 
     def _fit(self, train_dataloader: mx.gluon.data.DataLoader,
-             valid_dataloader: mx.gluon.data.DataLoader = None,
+             valid_dataset,
              lr: float = 0.01,
              n_epochs: int = 10,
              optimizer: str = 'adam',
@@ -58,6 +67,8 @@ class BaseModel:
         """
         if verbose:
             self.logger.setLevel(level=logging.INFO)
+            self.stream_log.setLevel(level=logging.INFO)
+            self.file_log.setLevel(level=logging.INFO)
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
 
@@ -73,7 +84,7 @@ class BaseModel:
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
             self._trained = True
             if checkpoint is not None and epoch % save_frequency == 0:
-                self.save_model(f'{checkpoint}')
+                self.save_model(f'{checkpoint}-{epoch:04}')
             # valid
             if valid_dataset is not None:
                 self._valid_log(valid_dataset)
@@ -116,7 +127,7 @@ class BaseModel:
             n_batch += 1
             loss_val += batch_loss
             # check the result of traing phase
-            if n_batch % 10 == 0:
+            if n_batch % 100 == 0:
                 self.logger.info(f'epoch {epoch}, batch {n_batch}, '
                                  f'batch_train_loss: {batch_loss:.4}')
         return loss_val / n_batch
@@ -143,11 +154,19 @@ class BaseModel:
         """
         raise NotImplementedError('valid log function is not implemented.')
 
+    def save_model(self, file_path: str) -> None:
+        raise NotImplementedError('save model function is not implemented.')
+
+    @classmethod
+    def load_model(cls, file_path, ctx=mx.cpu()):
+        raise NotImplementedError('load model function is not implemented.')
+
 
 class DeepModel(BaseModel):
 
-    def __init__(self, **kwargs):
+    def __init__(self, ctx=mx.cpu(), **kwargs):
         super().__init__(**kwargs)
+        self._ctx = ctx
 
     def _build_net(self):
         """
@@ -164,12 +183,11 @@ class DeepModel(BaseModel):
     def _initialize_net(self):
         self._net.initialize(init=mx.init.Xavier(), ctx=self._ctx)
         self._loss.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        if self._embed_weight is not None:
-            self._net.embedding_layer.weight.set_data(self._embed_weight)
         self._net.hybridize()
         self._loss.hybridize()
 
-    def _build_dataloader(self, dataset, batch_size, shuffle, last_batch):
+    def _build_dataloader(self, dataset, batch_size,
+                          shuffle=True, last_batch='keep'):
         return mx.gluon.data.DataLoader(dataset=dataset,
                                         batch_size=batch_size,
                                         shuffle=shuffle,
@@ -183,11 +201,9 @@ class DeepModel(BaseModel):
         raise NotImplementedError('build net is not implemented.')
 
     def fit(self, X=None, y=None, train_dataset=None,
-            valid_X=None, valid_y=None, valid_dataset=None,
-            batch_size=32, last_batch='keep',
-            update_embedding=True, n_epochs=15,
-            optimizer='adam', lr=3e-4, clip=5.0, verbose=True,
-            checkpoint=None, save_frequency=1):
+            valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
+            last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
+            clip=5.0, verbose=True, checkpoint=None, save_frequency=1):
         """
         Fit model.
 
@@ -218,6 +234,9 @@ class DeepModel(BaseModel):
         assert self._num_classes == len(train_dataset.label2idx)
 
         self.idx2labels = train_dataset.idx2labels
+        self.label_weights = mx.nd.array(
+            train_dataset.label_weights, ctx=self._ctx
+        )
         if self._vocab is None:
             self._vocab = train_dataset.vocab
             self._build()
@@ -226,14 +245,12 @@ class DeepModel(BaseModel):
             self.meta['label2idx'] = self._label2idx
 
         if valid_X and valid_y and valid_dataset is None:
-            valid_dataset = self._get_or_build_dataset(train_dataset, X, y)
-
-        if not update_embedding:
-            self._net.embedding_layer.weight.grad_req = 'null'
+            valid_dataset = self._get_or_build_dataset(valid_dataset,
+                                                       valid_X, valid_y)
 
         dataloader = self._build_dataloader(train_dataset, batch_size,
-                                            True, last_batch)
-        self._fit(dataloader, lr, n_epochs,
-                  valid_dataset=valid_dataset,
+                                            shuffle=True,
+                                            last_batch=last_batch)
+        self._fit(dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
                   optimizer=optimizer, clip=clip, verbose=verbose,
                   checkpoint=checkpoint, save_frequency=save_frequency)
