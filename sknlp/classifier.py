@@ -208,8 +208,6 @@ class DeepClassifier(DeepModel):
         s = self.score(dataset=valid_dataset)
         if self._is_multilabel or self._num_classes > 2:
             scores, avg_score = s
-        scores = self.score(dataset=valid_dataset)
-        if self._is_multilabel or self._num_classes > 2:
             for l, p, r, f, _ in zip(self.idx2labels(
                     list(range(self._num_classes))), *scores):
                 self.logger.info(f'label: {l} precision: {p}, '
