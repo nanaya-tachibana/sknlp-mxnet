@@ -14,7 +14,8 @@ from sklearn.metrics import precision_recall_fscore_support
 
 from .base import DeepModel
 from .data import Pad, _SimpleClassifyDataset
-from .embedding import EmbeddingLayer
+from .embedding import NonContextEmbeddingLayer
+from sknlp.loss import SampledSigmoidBCELoss
 
 
 class TextCNN(nn.HybridBlock):
@@ -29,10 +30,8 @@ class TextCNN(nn.HybridBlock):
                 embed_size=embed_size, num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
-                output_size=None, num_highway=num_highway,
-                prefix='cnn_')
-            self.cnn_dropout = nn.Dropout(
-                dropout, prefix='cnndropout_')
+                output_size=None, num_highway=num_highway, prefix='cnn_')
+            self.cnn_dropout = nn.Dropout(dropout, prefix='cnndropout_')
             self.dense_layer = nn.Dense(output_size, flatten=False,
                                         prefix='dense_')
 
@@ -55,8 +54,7 @@ class TextRNN(nn.HybridBlock):
             self.rnn_layer = rnn.LSTM(hidden_size // 2, num_rnn_layers,
                                       dropout=dropout, bidirectional=True,
                                       prefix='rnn_')
-            self.rnn_dropout = nn.Dropout(
-                dropout, prefix='rnndropout_')
+            self.rnn_dropout = nn.Dropout(dropout, prefix='rnndropout_')
             self.dense_layer = nn.Dense(output_size, flatten=False,
                                         prefix='dense_')
 
@@ -67,15 +65,47 @@ class TextRNN(nn.HybridBlock):
         """
         rnn_output = self.rnn_layer(inputs)
         if self._dense_connection == 'last' and mask is not None:
-            rnn_output = F.SequenceLast(rnn_output,
-                                        sequence_length=F.sum(mask, axis=0),
-                                        use_sequence_length=True)
-        if self._dense_connection == 'average':
-            rnn_output = F.sum(rnn_output, axis=0)
+            rnn_output = F.concat(
+                F.SequenceLast(rnn_output,
+                               sequence_length=F.sum(mask, axis=0),
+                               use_sequence_length=True),
+                F.slice_axis(rnn_output, axis=0, begin=0, end=1)
+            )
         return self.dense_layer(self.rnn_dropout(rnn_output))
 
 
-def _decode(logits, is_binary=False, is_multilabel=False, threshold=0.5):
+class TextRCNN(nn.HybridBlock):
+
+    def __init__(self, embed_size=100, num_filters=(25, 50, 75, 100),
+                 ngram_filter_sizes=(1, 2, 3, 4),
+                 conv_layer_activation='tanh', num_highway=1,
+                 rnn_hidden_size=512, num_rnn_layers=1, output_size=1,
+                 dropout=0.0, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.rnn_layer = rnn.LSTM(rnn_hidden_size // 2, num_rnn_layers,
+                                      dropout=dropout, bidirectional=True,
+                                      prefix='rnn_')
+            self.cnn_layer = gluonnlp.model.ConvolutionalEncoder(
+                embed_size=rnn_hidden_size, num_filters=num_filters,
+                ngram_filter_sizes=ngram_filter_sizes,
+                conv_layer_activation=conv_layer_activation,
+                output_size=None, num_highway=num_highway, prefix='cnn_')
+            self.cnn_dropout = nn.Dropout(dropout, prefix='cnndropout_')
+            self.dense_layer = nn.Dense(output_size, flatten=False,
+                                        prefix='dense_')
+
+    def hybrid_forward(self, F, inputs, mask):
+        """
+        inputs: shape(seq_length, batch_size)
+        mask: shape(seq_length, batch_size)
+        """
+        r = self.rnn_layer(inputs)
+        c = self.cnn_layer(r, mask)
+        return self.dense_layer(self.cnn_dropout(c))
+
+
+def _decode(logits, threshold, is_binary=False, is_multilabel=False):
     if is_binary and not is_multilabel:
         assert logits.shape[1] == 2
         return np.where(expit(logits[:, 1]) > threshold, 1, 0)
@@ -87,34 +117,37 @@ def _decode(logits, is_binary=False, is_multilabel=False, threshold=0.5):
 
 class _ClassifyBlockComposition(nn.HybridBlock):
 
-    def __init__(self, embedding_layer, encode_layer, **kwargs):
+    def __init__(self, embedding_layer, encode_layer, dropout=0.0, **kwargs):
         super().__init__(**kwargs)
         with self.name_scope():
             self.embedding_layer = embedding_layer
+            self.embed_dropout = nn.Dropout(dropout, prefix='embeddropout_')
             self.encode_layer = encode_layer
 
     def hybrid_forward(self, F, inputs, mask=None):
-        return self.encode_layer(self.embedding_layer(inputs), mask)
+        return self.encode_layer(self.embed_dropout(
+            self.embedding_layer(inputs)), mask
+        )
 
 
 class DeepClassifier(DeepModel):
 
     def __init__(self, num_classes=2, class_weight=None,
-                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
-                 vocab=None, embed_weight=None,
-                 segmenter='jieba', max_length=100, embed_size=100, **kwargs):
+                 is_multilabel=False, label2idx=None, vocab=None,
+                 segmenter='jieba', max_length=100, embed_size=100,
+                 embedding_layer=None, threshold=None, **kwargs):
         super().__init__(**kwargs)
         self._trained = False
         self._num_classes = num_classes
         self._class_weight = class_weight
         self._is_multilabel = is_multilabel
-        self._ctx = ctx
         self._segmenter = segmenter
         self._max_length = max_length
         self._embed_size = embed_size
         self._vocab = vocab
-        self._embed_weight = embed_weight
         self._label2idx = label2idx
+        self.embedding_layer = embedding_layer
+        self._threshold = threshold or dict()
 
         self.meta = {
             'num_classes': self._num_classes,
@@ -123,12 +156,21 @@ class DeepClassifier(DeepModel):
             'label2idx': self._label2idx,
             'max_length': self._max_length,
             'segmenter': self._segmenter,
-            'embed_size': self._embed_size}
+            'embed_size': self._embed_size,
+            'threshold': self._threshold
+        }
 
     def _build(self):
+        if self.embedding_layer is None:
+            self.embedding_layer = NonContextEmbeddingLayer(
+                len(self._vocab), self._embed_size, prefix='embed_'
+            )
+        else:
+            self._embed_size = self.embedding_layer._embed_size
+
         self._build_net()
         if self._is_multilabel:
-            self._loss = mx.gluon.loss.SigmoidBCELoss()
+            self._loss = SampledSigmoidBCELoss()
         else:
             self._loss = mx.gluon.loss.SoftmaxCELoss(sparse_label=False)
         self._trainable = [self._net]
@@ -143,10 +185,13 @@ class DeepClassifier(DeepModel):
                                       segmenter=self._segmenter,
                                       max_length=self._max_length)
 
-    def _decode(self, x, threshold=0.5):
-        return _decode(x, is_binary=self._num_classes == 2,
-                       is_multilabel=self._is_multilabel,
-                       threshold=threshold)
+    def _decode(self, x):
+        threshold = np.array([
+            self._threshold.get(l, 0.5)
+            for l in self.idx2labels(range(self._num_classes))
+        ])
+        return _decode(x, threshold, is_binary=self._num_classes == 2,
+                       is_multilabel=self._is_multilabel)
 
     def _debinarize(self, binarized_label):
         l = [[i for i, t in enumerate(bl) if t == 1] for bl in binarized_label]
@@ -171,10 +216,22 @@ class DeepClassifier(DeepModel):
             self.logger.info(f'precision: {p}, recall: {r}, f1: {f}')
 
     def _calculate_loss(self, batch_inputs, batch_mask, batch_labels):
+        batch_label_mask = mx.nd.where(
+            batch_labels == 1, batch_labels, mx.nd.where(
+                mx.nd.broadcast_lesser_equal(
+                    mx.nd.random_uniform(shape=batch_labels.shape),
+                    self.label_weights
+                ),
+                mx.nd.ones_like(batch_labels),
+                mx.nd.zeros_like(batch_labels)
+            )
+        )
         return self._loss(
             self._net(batch_inputs.transpose(axes=(1, 0)),
                       batch_mask.transpose(axes=(1, 0))),
-            batch_labels)
+            batch_labels,
+            batch_label_mask
+        )
 
     @property
     def _batchify_fn(self):
@@ -219,8 +276,14 @@ class DeepClassifier(DeepModel):
             return precision_recall_fscore_support(y, predictions,
                                                    average='binary')
         else:
-            return precision_recall_fscore_support(
-                y, predictions, labels=list(range(self._num_classes)))
+            return (
+                precision_recall_fscore_support(
+                    y, predictions, labels=list(range(self._num_classes))),
+                precision_recall_fscore_support(
+                    y, predictions,
+                    labels=list(range(self._num_classes)), average='micro'
+                )
+            )
 
     def save_model(self, file_path: str) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -255,18 +318,19 @@ class DeepClassifier(DeepModel):
 class TextCNNClassifier(DeepClassifier):
 
     def __init__(self, num_classes=2, class_weight=None,
-                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
-                 vocab=None, embed_weight=None, segmenter='jieba',
-                 max_length=100, embed_size=100,
+                 is_multilabel=False, label2idx=None, vocab=None,
+                 segmenter='jieba', max_length=100,
+                 embed_size=100, threshold=None,
                  num_filters=(25, 50, 75, 100, 125, 150),
                  ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
-                 conv_layer_activation='tanh', dropout=0.5,
-                 num_highway=1, **kwargs):
+                 num_highway=1, conv_layer_activation='tanh', dropout=0.5,
+                 embedding_layer=None, ctx=mx.cpu(), **kwargs):
         super().__init__(num_classes=num_classes, class_weight=class_weight,
                          is_multilabel=is_multilabel, label2idx=label2idx,
-                         ctx=ctx, vocab=vocab, embed_weight=embed_weight,
-                         segmenter=segmenter, max_length=max_length,
-                         embed_size=embed_size, **kwargs)
+                         ctx=ctx, vocab=vocab, segmenter=segmenter,
+                         max_length=max_length, embed_size=embed_size,
+                         embedding_layer=embedding_layer, threshold=threshold,
+                         **kwargs)
         self._num_filters = num_filters
         self._ngram_filter_sizes = ngram_filter_sizes
         self._conv_layer_activation = conv_layer_activation
@@ -285,8 +349,7 @@ class TextCNNClassifier(DeepClassifier):
 
     def _build_net(self):
         self._net = _ClassifyBlockComposition(
-            EmbeddingLayer(len(self._vocab),
-                           self._embed_size, prefix='embed_'),
+            self.embedding_layer,
             TextCNN(embed_size=self._embed_size,
                     num_filters=self._num_filters,
                     ngram_filter_sizes=self._ngram_filter_sizes,
@@ -294,7 +357,8 @@ class TextCNNClassifier(DeepClassifier):
                     output_size=self._num_classes,
                     dropout=self._dropout,
                     num_highway=self._num_highway,
-                    prefix='encode_'))
+                    prefix='encode_')
+        )
         self.meta.update({'vocab_size': len(self._vocab)})
 
     @property
@@ -308,16 +372,18 @@ class TextCNNClassifier(DeepClassifier):
 class TextRNNClassifier(DeepClassifier):
 
     def __init__(self, num_classes=2, class_weight=None,
-                 is_multilabel=False, label2idx=None, ctx=mx.cpu(),
-                 vocab=None, embed_weight=None, segmenter='jieba',
+                 is_multilabel=False, label2idx=None, vocab=None,
+                 segmenter='jieba', threshold=None,
                  max_length=100, embed_size=100,
                  hidden_size=512, num_rnn_layers=1, output_size=1,
-                 dropout=0.5, dense_connection='last', **kwargs):
+                 dropout=0.5, dense_connection='last', embedding_layer=None,
+                 ctx=mx.cpu(), **kwargs):
         super().__init__(num_classes=num_classes, class_weight=class_weight,
                          is_multilabel=is_multilabel, label2idx=label2idx,
-                         ctx=ctx, vocab=vocab, embed_weight=embed_weight,
-                         segmenter=segmenter, max_length=max_length,
-                         embed_size=embed_size, **kwargs)
+                         ctx=ctx, vocab=vocab, segmenter=segmenter,
+                         max_length=max_length, embed_size=embed_size,
+                         embedding_layer=embedding_layer, threshold=threshold,
+                         **kwargs)
         self._hidden_size = hidden_size
         self._num_rnn_layers = num_rnn_layers
         self._dropout = dropout
@@ -334,8 +400,7 @@ class TextRNNClassifier(DeepClassifier):
 
     def _build_net(self):
         self._net = _ClassifyBlockComposition(
-            EmbeddingLayer(len(self._vocab),
-                           self._embed_size, prefix='embed_'),
+            self.embedding_layer,
             TextRNN(hidden_size=self._hidden_size,
                     num_rnn_layers=self._num_rnn_layers,
                     dropout=self._dropout,
@@ -343,3 +408,66 @@ class TextRNNClassifier(DeepClassifier):
                     output_size=self._num_classes,
                     prefix='encode_'))
         self.meta.update({'vocab_size': len(self._vocab)})
+
+
+class TextRCNNClassifier(DeepClassifier):
+
+    def __init__(self, num_classes=2, class_weight=None,
+                 is_multilabel=False, label2idx=None, vocab=None,
+                 segmenter='jieba', threshold=None,
+                 max_length=100, embed_size=100,
+                 num_filters=(25, 50, 75, 100, 125, 150),
+                 ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
+                 conv_layer_activation='tanh', rnn_hidden_size=512,
+                 num_rnn_layers=1, dropout=0.5, embedding_layer=None,
+                 num_highway=1, ctx=mx.cpu(), **kwargs):
+        super().__init__(num_classes=num_classes, class_weight=class_weight,
+                         is_multilabel=is_multilabel, label2idx=label2idx,
+                         vocab=vocab, segmenter=segmenter,
+                         max_length=max_length, embed_size=embed_size,
+                         embedding_layer=embedding_layer, ctx=ctx,
+                         threshold=threshold, **kwargs)
+        self._num_filters = num_filters
+        self._ngram_filter_sizes = ngram_filter_sizes
+        self._conv_layer_activation = conv_layer_activation
+        self._dropout = dropout
+        self._num_highway = num_highway
+        self._rnn_hidden_size = rnn_hidden_size
+        self._num_rnn_layers = num_rnn_layers
+        self._dropout = dropout
+
+        self.meta.update({
+            'num_filters': list(self._num_filters),
+            'ngram_filter_sizes': list(self._ngram_filter_sizes),
+            'conv_layer_activation': self._conv_layer_activation,
+            'dropout': self._dropout,
+            'num_highway': self._num_highway,
+            'rnn_hidden_size': rnn_hidden_size,
+            'num_rnn_layers': num_rnn_layers,
+        })
+
+        if vocab is not None:
+            self._build()
+
+    def _build_net(self):
+        self._net = _ClassifyBlockComposition(
+            self.embedding_layer,
+            TextRCNN(embed_size=self._embed_size,
+                     num_filters=self._num_filters,
+                     ngram_filter_sizes=self._ngram_filter_sizes,
+                     conv_layer_activation=self._conv_layer_activation,
+                     output_size=self._num_classes,
+                     dropout=self._dropout,
+                     num_highway=self._num_highway,
+                     rnn_hidden_size=self._rnn_hidden_size,
+                     num_rnn_layers=self._num_rnn_layers,
+                     prefix='encode_')
+        )
+        self.meta.update({'vocab_size': len(self._vocab)})
+
+    @property
+    def _batchify_fn(self):
+        return gluonnlp.data.batchify.Tuple(
+            Pad(axis=0, pad_val=1, min_length=max(self._ngram_filter_sizes)),
+            Pad(axis=0, min_length=max(self._ngram_filter_sizes)),
+            gluonnlp.data.batchify.Stack())

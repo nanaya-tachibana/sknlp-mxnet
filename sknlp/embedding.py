@@ -4,6 +4,18 @@ from mxnet.gluon import nn
 
 class EmbeddingLayer(nn.HybridBlock):
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def hybrid_forward(self, F, inputs):
+        """
+        inputs: shape(seq_length, batch_size)
+        """
+        raise NotImplementedError('forward function is not implemented.')
+
+
+class NonContextEmbeddingLayer(EmbeddingLayer):
+
     def __init__(self, vocab_size, embed_size, **kwargs):
         super().__init__(**kwargs)
         self._vocab_size = vocab_size
