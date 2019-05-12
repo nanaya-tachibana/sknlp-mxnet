@@ -16,8 +16,8 @@ class BaseModel:
              lr: float = 0.01,
              n_epochs: int = 10,
              optimizer: str = 'adam',
-             update_steps_lr: int = 500,
-             factor: float = 1,
+             update_steps_lr: int = 300,
+             factor: float = 0.9,
              stop_factor_lr: float = 2e-6,
              clip: float = 5,
              checkpoint: str = None,
@@ -55,7 +55,9 @@ class BaseModel:
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
-            update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
+            update_steps_lr, factor=factor,
+            stop_factor_lr=stop_factor_lr
+        )
 
         assert len(self._trainable) > 0, 'No trainable parameters'
 
@@ -190,7 +192,9 @@ class DeepModel(BaseModel):
         self, X=None, y=None, train_dataset=None,
         valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
         last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
-        clip=5.0, verbose=True, checkpoint=None, save_frequency=1
+        update_steps_lr: int = 300, factor: float = 0.9,
+        stop_factor_lr: float = 2e-6, clip=5.0, checkpoint=None,
+        save_frequency=1
     ):
         """
         Fit model.
@@ -244,6 +248,7 @@ class DeepModel(BaseModel):
         )
         self._fit(
             dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
-            optimizer=optimizer, clip=clip,
+            update_steps_lr=update_steps_lr, factor=factor,
+            stop_factor_lr=stop_factor_lr, optimizer=optimizer, clip=clip,
             checkpoint=checkpoint, save_frequency=save_frequency
         )

@@ -71,7 +71,7 @@ class DeepClassifier(DeepModel):
         self.meta['embedding_prefix'] = self.embedding_layer.prefix
         self.meta['encode_prefix'] = self.encode_layer.prefix
         if self._is_multilabel:
-            self._loss = SampledSigmoidBCELoss()
+            self._loss = mx.gluon.loss.SigmoidBCELoss()
         else:
             self._loss = mx.gluon.loss.SoftmaxCELoss(sparse_label=False)
         self._trainable = {
@@ -131,23 +131,22 @@ class DeepClassifier(DeepModel):
         )
 
     def _calculate_loss(self, batch_inputs, batch_mask, batch_labels):
-        batch_label_mask = mx.nd.where(
-            batch_labels == 1, batch_labels, mx.nd.where(
-                mx.nd.broadcast_lesser_equal(
-                    mx.nd.random_uniform(shape=batch_labels.shape),
-                    self.label_weights
-                ),
-                mx.nd.ones_like(batch_labels),
-                mx.nd.zeros_like(batch_labels)
-            )
-        )
+        # batch_label_mask = mx.nd.where(
+        #     batch_labels == 1, batch_labels, mx.nd.where(
+        #         mx.nd.broadcast_lesser_equal(
+        #             mx.nd.random_uniform(shape=batch_labels.shape),
+        #             self.label_weights
+        #         ),
+        #         mx.nd.ones_like(batch_labels),
+        #         mx.nd.zeros_like(batch_labels)
+        #     )
+        # )
         return self._loss(
             self._calculate_logits(
                 batch_inputs.transpose(axes=(1, 0)),
                 batch_mask.transpose(axes=(1, 0))
             ),
             batch_labels.astype(dtype='float32'),
-            batch_label_mask.astype(dtype='float32')
         )
 
     def _batchify_fn(self):
