@@ -1,28 +1,18 @@
 import logging
-
 import mxnet as mx
+from .data import NLPDataset
 
-
-def _get_logger():
-    logger = logging.getLogger(__name__)
-    logger.setLevel(level=logging.WARNING)
-    stream_log = logging.StreamHandler()
-    stream_log.setLevel(level=logging.WARNING)
-    file_log = logging.FileHandler('train.log')
-    file_log.setLevel(level=logging.WARNING)
-    logger.addHandler(stream_log)
-    logger.addHandler(file_log)
-    return logger, stream_log, file_log
+logger = logging.getLogger(__name__)
 
 
 class BaseModel:
 
-    def __init__(self, **kwargs):
-        self.logger, self.stream_log, self.file_log = _get_logger()
-        self._trainable = []
+    def __init__(self, ctx):
+        self._ctx = ctx
+        self._trainable = dict()
 
     def _fit(self, train_dataloader: mx.gluon.data.DataLoader,
-             valid_dataset,
+             valid_dataset: NLPDataset,
              lr: float = 0.01,
              n_epochs: int = 10,
              optimizer: str = 'adam',
@@ -30,7 +20,6 @@ class BaseModel:
              factor: float = 1,
              stop_factor_lr: float = 2e-6,
              clip: float = 5,
-             verbose: bool = True,
              checkpoint: str = None,
              save_frequency: int = 1):
         """
@@ -65,17 +54,12 @@ class BaseModel:
         save_frequency: int
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
-        if verbose:
-            self.logger.setLevel(level=logging.INFO)
-            self.stream_log.setLevel(level=logging.INFO)
-            self.file_log.setLevel(level=logging.INFO)
         lr_scheduler = mx.lr_scheduler.FactorScheduler(
             update_steps_lr, factor=factor, stop_factor_lr=stop_factor_lr)
 
-        assert (getattr(self, '_trainable', None) is not None and
-                len(self._trainable) > 0), 'No trainable parameters'
+        assert len(self._trainable) > 0, 'No trainable parameters'
 
-        params_dict = self._get_trainable_params()
+        params_dict = self._collect_params()
         trainer = mx.gluon.Trainer(params_dict,
                                    optimizer,
                                    {'learning_rate': lr,
@@ -84,21 +68,22 @@ class BaseModel:
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
             self._trained = True
             if checkpoint is not None and epoch % save_frequency == 0:
-                self.save_model(f'{checkpoint}-{epoch:04}')
-            # valid
+                self.save(f'{checkpoint}-{epoch:04}')
+
             if valid_dataset is not None:
                 self._valid_log(valid_dataset)
 
-    def _get_trainable_params(self):
-        params_dict = self._trainable[0].collect_params()
-        for t in self._trainable[1:]:
-            params_dict.update(t.collect_params())
+    def _collect_params(self):
+        params_dict = mx.gluon.ParameterDict()
+        for t in self._trainable:
+            params_dict.update(self._trainable[t].collect_params())
         return params_dict
 
     def _clip_gradient(self, clip):
-        params_dict = self._get_trainable_params()
+        params_dict = self._collect_params()
         clip_params = [
-            p.data() for p in params_dict.values()]
+            p.data() for p in params_dict.values()
+        ]
 
         norm = mx.nd.array([0.0], self._ctx)
         for param in clip_params:
@@ -126,10 +111,9 @@ class BaseModel:
             batch_loss = loss.mean().asscalar()
             n_batch += 1
             loss_val += batch_loss
-            # check the result of traing phase
             if n_batch % 100 == 0:
-                self.logger.info(f'epoch {epoch}, batch {n_batch}, '
-                                 f'batch_train_loss: {batch_loss:.4}')
+                logger.info(f'epoch {epoch}, batch {n_batch}, '
+                            f'batch_train_loss: {batch_loss:.4}')
         return loss_val / n_batch
 
     def _calculate_loss(self, *args):
@@ -154,25 +138,22 @@ class BaseModel:
         """
         raise NotImplementedError('valid log function is not implemented.')
 
-    def save_model(self, file_path: str) -> None:
+    def save(self, file_path: str) -> None:
         raise NotImplementedError('save model function is not implemented.')
 
     @classmethod
-    def load_model(cls, file_path, ctx=mx.cpu()):
+    def load(cls, file_path, ctx=mx.cpu()):
         raise NotImplementedError('load model function is not implemented.')
 
 
 class DeepModel(BaseModel):
 
-    def __init__(self, ctx=mx.cpu(), **kwargs):
-        super().__init__(**kwargs)
-        self._ctx = ctx
-
-    def _build_net(self):
-        """
-        Implement this function to build net.
-        """
-        raise NotImplementedError('build net is not implemented.')
+    def __init__(self, vocab=None, label2idx=None, ctx=mx.cpu(), **kwargs):
+        super().__init__(ctx, **kwargs)
+        self._vocab = vocab
+        self._label2idx = label2idx
+        self._loss = None
+        self.meta = dict()
 
     def _build(self):
         """
@@ -180,11 +161,16 @@ class DeepModel(BaseModel):
         """
         raise NotImplementedError('build is not implemented.')
 
-    def _initialize_net(self):
-        self._net.initialize(init=mx.init.Xavier(), ctx=self._ctx)
+    def _initialize(self):
+        self.embedding_layer.initialize(init=mx.init.Xavier(), ctx=self._ctx)
+        self.encode_layer.initialize(init=mx.init.Xavier(), ctx=self._ctx)
         self._loss.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        self._net.hybridize()
+        self.embedding_layer.hybridize()
+        self.encode_layer.hybridize()
         self._loss.hybridize()
+
+    def _batchify_fn(self):
+        raise NotImplementedError('_batchify_fn is not implemented.')
 
     def _build_dataloader(self, dataset, batch_size,
                           shuffle=True, last_batch='keep'):
@@ -192,18 +178,20 @@ class DeepModel(BaseModel):
                                         batch_size=batch_size,
                                         shuffle=shuffle,
                                         last_batch=last_batch,
-                                        batchify_fn=self._batchify_fn)
+                                        batchify_fn=self._batchify_fn())
 
     def _get_or_build_dataset(self, dataset, X, y):
         """
-        Implement this function to build net.
+        Implement this function to build dataset.
         """
-        raise NotImplementedError('build net is not implemented.')
+        raise NotImplementedError('build dataset is not implemented.')
 
-    def fit(self, X=None, y=None, train_dataset=None,
-            valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
-            last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
-            clip=5.0, verbose=True, checkpoint=None, save_frequency=1):
+    def fit(
+        self, X=None, y=None, train_dataset=None,
+        valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
+        last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
+        clip=5.0, verbose=True, checkpoint=None, save_frequency=1
+    ):
         """
         Fit model.
 
@@ -231,26 +219,31 @@ class DeepModel(BaseModel):
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
         train_dataset = self._get_or_build_dataset(train_dataset, X, y)
-        assert self._num_classes == len(train_dataset.label2idx)
 
         self.idx2labels = train_dataset.idx2labels
         self.label_weights = mx.nd.array(
-            train_dataset.label_weights, ctx=self._ctx
+            train_dataset._label_weights, ctx=self._ctx
         )
+
         if self._vocab is None:
-            self._vocab = train_dataset.vocab
-            self._build()
+            self._vocab = train_dataset._vocab
         if self._label2idx is None:
-            self._label2idx = train_dataset.label2idx
+            self._label2idx = train_dataset._label2idx
             self.meta['label2idx'] = self._label2idx
+        if not self._trained:
+            self._build()
+            self._initialize()
 
         if valid_X and valid_y and valid_dataset is None:
-            valid_dataset = self._get_or_build_dataset(valid_dataset,
-                                                       valid_X, valid_y)
+            valid_dataset = self._get_or_build_dataset(
+                valid_dataset, valid_X, valid_y
+            )
 
-        dataloader = self._build_dataloader(train_dataset, batch_size,
-                                            shuffle=True,
-                                            last_batch=last_batch)
-        self._fit(dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
-                  optimizer=optimizer, clip=clip, verbose=verbose,
-                  checkpoint=checkpoint, save_frequency=save_frequency)
+        dataloader = self._build_dataloader(
+            train_dataset, batch_size, shuffle=True, last_batch=last_batch
+        )
+        self._fit(
+            dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
+            optimizer=optimizer, clip=clip,
+            checkpoint=checkpoint, save_frequency=save_frequency
+        )

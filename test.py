@@ -1,7 +1,6 @@
+import logging
 import mxnet as mx
-from sknlp.classifier import TextCNNClassifier
-from sknlp.data import (load_msra_dataset, load_intent_dataset,
-                        load_waimai_dataset)
+from sknlp.classifier import TextRCNNClassifier, TextCNNClassifier, TextRNNClassifier
 from sklearn.metrics import precision_recall_fscore_support
 from sknlp.tagger import TextRNNTagger
 from sknlp.elmo import AdaptiveSoftmax
@@ -29,14 +28,16 @@ def multi2single(intents):
         return 'nonsense'
 
 
-if __name__ == '__main__':
-    # clf = TextCNNClassifier(3, True, segmenter=list)
-    # X, y = (['123abi', '123你好', '123你好abc', '你好', 'abc', '123'],
-    #         ['n|a', 'n|w', 'n|a|w', 'w', 'a', 'n'])
-    # clf.fit(X, y, valid_X=X, valid_y=y, n_epochs=12)
-    # print(clf.predict(['abc123123', '1你好23']))
+logging.basicConfig(level=logging.DEBUG)
 
-    # clf = TextCNNClassifier(3, False, segmenter=list)
+if __name__ == '__main__':
+    clf = TextRNNClassifier(3, is_multilabel=True, segmenter=None)
+    X, y = (['123abi', '123你好', '123你好abc', '你好', 'abc', '123'],
+            ['n|a', 'n|w', 'n|a|w', 'w', 'a', 'n'])
+    clf.fit(X, y, valid_X=X, valid_y=y, n_epochs=30, checkpoint='temp/test')
+    print(clf.predict(['abc123123', '1你好23']))
+
+    # clf = TextRCNNClassifier(3, is_multilabel=False, segmenter=None)
     # X, y = (['123a', '1你好啊', '2你好啊c', '你好', 'abc', '123', 'ab1c', '12b3', 'ab你c', '1啊23'],
     #         ['n', 'w', 'w', 'w', 'a', 'n', 'a', 'n', 'a', 'n'])
     # clf.fit(X, y, valid_X=X, valid_y=y, n_epochs=12)
@@ -73,26 +74,26 @@ if __name__ == '__main__':
     # # # clf.fit(train_dataset=train, valid_dataset=test, n_epochs=60, checkpoint='dev/tagger')
     # # clf = TextRNNTagger.load_model('dev/tagger.tar.gz')
     # # print(clf.score(dataset=test))
-    x = mx.nd.array([[0.6939, 0.2245, 0.8520, 0.9945, 0.0832, 0.0112, 0.0476, 0.0417],
-                     [0.8796, 0.8644, 0.4868, 0.5303, 0.1786, 0.3198, 0.3256, 0.6437],
-                     [0.7293, 0.0287, 0.2014, 0.3848, 0.0433, 0.4146, 0.4891, 0.1255]])
-    head_w = mx.nd.array([[0.2810, 0.0114, -0.2531, 0.0009, -0.2719, -0.0525, 0.0934, -0.1241],
-                          [0.1130, -0.1605, 0.0147, -0.2976, -0.3403, 0.3490, 0.1385, 0.3341],
-                          [-0.0894, 0.2479, -0.2980, -0.0052, 0.3377, -0.1223, 0.2446, -0.3370]])
-    tail_proj = mx.nd.array([[-0.2761, 0.3084, -0.2970, 0.1652, 0.1107, -0.3243, -0.2168, -0.1898],
-                             [0.2112, -0.0661, 0.1959, -0.0734, -0.0302, 0.1943, -0.1861, 0.2701]])
-    tail_w = mx.nd.array([[-0.1995, 0.0196],
-                          [-0.2380, -0.3977],
-                          [-0.0473, 0.0400],
-                          [0.6211, 0.3060],
-                          [-0.5989, -0.6056],
-                          [0.1567, 0.5375],
-                          [-0.2101, -0.0704],
-                          [-0.3419, 0.3128]])
-    target = mx.nd.array([0, 1, 7])
-    soft = AdaptiveSoftmax(8, 10, [2, ])
-    soft.initialize()
-    soft.head_layer.weight.set_data(head_w)
-    soft.tail_layers[0][0].weight.set_data(tail_proj)
-    soft.tail_layers[0][1].weight.set_data(tail_w)
-    print(soft(x, target))
+    # x = mx.nd.array([[0.6939, 0.2245, 0.8520, 0.9945, 0.0832, 0.0112, 0.0476, 0.0417],
+    #                  [0.8796, 0.8644, 0.4868, 0.5303, 0.1786, 0.3198, 0.3256, 0.6437],
+    #                  [0.7293, 0.0287, 0.2014, 0.3848, 0.0433, 0.4146, 0.4891, 0.1255]])
+    # head_w = mx.nd.array([[0.2810, 0.0114, -0.2531, 0.0009, -0.2719, -0.0525, 0.0934, -0.1241],
+    #                       [0.1130, -0.1605, 0.0147, -0.2976, -0.3403, 0.3490, 0.1385, 0.3341],
+    #                       [-0.0894, 0.2479, -0.2980, -0.0052, 0.3377, -0.1223, 0.2446, -0.3370]])
+    # tail_proj = mx.nd.array([[-0.2761, 0.3084, -0.2970, 0.1652, 0.1107, -0.3243, -0.2168, -0.1898],
+    #                          [0.2112, -0.0661, 0.1959, -0.0734, -0.0302, 0.1943, -0.1861, 0.2701]])
+    # tail_w = mx.nd.array([[-0.1995, 0.0196],
+    #                       [-0.2380, -0.3977],
+    #                       [-0.0473, 0.0400],
+    #                       [0.6211, 0.3060],
+    #                       [-0.5989, -0.6056],
+    #                       [0.1567, 0.5375],
+    #                       [-0.2101, -0.0704],
+    #                       [-0.3419, 0.3128]])
+    # target = mx.nd.array([0, 1, 7])
+    # soft = AdaptiveSoftmax(8, 10, [2, ])
+    # soft.initialize()
+    # soft.head_layer.weight.set_data(head_w)
+    # soft.tail_layers[0][0].weight.set_data(tail_proj)
+    # soft.tail_layers[0][1].weight.set_data(tail_w)
+    # print(soft(x, target))

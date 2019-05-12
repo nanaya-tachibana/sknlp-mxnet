@@ -1,39 +1,21 @@
 import os
+
 import pytest
-from sknlp.data.data import (SimpleIndexedRecordIO, RecordFileDataset,
-                             InMemoryDataset)
 
-
-IDX_FILE = 'tmp.idx'
-REC_FILE = 'tmp.rec'
-
-
-def set_up(tmp_path):
-    record = SimpleIndexedRecordIO(os.path.join(tmp_path, IDX_FILE),
-                                   os.path.join(tmp_path, REC_FILE),
-                                   'w')
-    for i in range(5):
-        d = f'record_{i},{"|".join([str(c) for c in range(i)])}'
-        record.write(d.encode('utf-8'))
-    record.close()
+from sknlp.data.data import SimpleIndexedRecordIO
 
 
 class TestSimpleIndexedRecordIO:
-
-    def test_read_write(self, tmp_path):
-        set_up(tmp_path)
-        record = SimpleIndexedRecordIO(os.path.join(tmp_path, IDX_FILE),
-                                       os.path.join(tmp_path, REC_FILE),
-                                       'r')
-        assert record.read_idx(2).decode('utf-8') == 'record_2,0|1'
-
-
-class TestRecordFileDataset:
 
     IDX_FILE = 'tmp.idx'
     REC_FILE = 'tmp.rec'
 
     def test_read_write(self, tmp_path):
-        set_up(tmp_path)
-        dataset = RecordFileDataset(os.path.join(tmp_path, REC_FILE))
-        assert dataset[2].decode('utf-8') == 'record_2,0|1'
+        idx_file = os.path.join(tmp_path, self.IDX_FILE)
+        rec_file = os.path.join(tmp_path, self.REC_FILE)
+        record = SimpleIndexedRecordIO(idx_file, rec_file, 'w')
+        record.write(f'record_0,0|1'.encode('utf-8'))
+        record.write(f'record_1,0|1'.encode('utf-8'))
+        record.close()
+        record = SimpleIndexedRecordIO(idx_file, rec_file, 'r')
+        assert record.read_idx(1).decode('utf-8') == 'record_1,0|1'

@@ -1,6 +1,10 @@
 # Module for constructing a linear-chain CRF.
 # This implementation borrows mostly from Tensorflow CRF module (https://github.com/tensorflow/tensorflow/blob/r1.4/tensorflow/contrib/crf/python/ops/crf.py#L477).
 # For an introduction to conditional random field, read https://homepages.inf.ed.ac.uk/csutton/publications/crftut-fnt.pdf.
+import os
+import tempfile
+import shutil
+
 import numpy as np
 import functools
 
@@ -219,6 +223,23 @@ class Crf(nn.HybridBlock):
             _slice(F, emissions, begin=0, end=1, axis=0))
         return log_sum_exp(F, log_probs, axis=1)
 
+    def save(self, file_path):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.export(os.path.join(temp_dir, 'crf_loss'))
+            shutil.make_archive(file_path, 'gztar', temp_dir)
+
+    @classmethod
+    def load(cls, file_path, use_mask=True, ctx=mx.cpu()):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            shutil.unpack_archive(file_path, temp_dir, 'gztar')
+            inputs = ['data0', 'data1', 'data2']
+            ins = nn.SymbolBlock.imports(
+                os.path.join(temp_dir, 'crf_loss-symbol.json'), inputs,
+                os.path.join(temp_dir, 'crf_loss-0000.params'), ctx=ctx
+            )
+            ins.hybridize()
+        return ins
+
 
 def _crf_viterbi_forward(F, num_tags, transitions, inputs, scores):
     emission, mask = inputs
@@ -311,10 +332,10 @@ if __name__ == '__main__':
         [-0.0747, -0.0884, -0.0698, 0.0517, -0.0683],
         [0.0845, -0.0411, -0.0849, -0.0357, -0.0408],
         [0.0506, -0.0526, -0.0175, -0.0538, 0.0537]]))
-    assert abs(m(emissions, tags, mask).sum().asscalar()
-               - (-8.493363)) <= 1e-4
-    assert abs(m(emissions, tags, mx.nd.ones_like(tags)).sum().asscalar()
-               - (-13.35252)) <= 1e-4
+    assert abs(m(emissions, tags, mask).sum().asscalar() -
+               (-8.493363)) <= 1e-4
+    assert abs(m(emissions, tags, mx.nd.ones_like(tags)).sum().asscalar() -
+               (-13.35252)) <= 1e-4
 
     with mx.autograd.record():
         loss = m(emissions, tags, mask)

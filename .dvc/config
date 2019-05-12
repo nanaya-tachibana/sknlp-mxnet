@@ -1,0 +1,5 @@
+['remote "oss"']
+url = oss://aispeech-aichat/gi
+oss_endpoint = oss-cn-hangzhou.aliyuncs.com
+[core]
+remote = oss

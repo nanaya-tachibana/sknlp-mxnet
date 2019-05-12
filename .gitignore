@@ -10,4 +10,5 @@ deepqa.egg-info/
 dev/
 train_data/
 valid_data/
+pyhanlp/
 pretrain/
