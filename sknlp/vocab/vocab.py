@@ -1,4 +1,3 @@
-from __future__ import annotations
 import numpy as np
 import gluonnlp
 from gensim.models import KeyedVectors
@@ -10,7 +9,7 @@ class Vocab(gluonnlp.Vocab):
     @classmethod
     def from_word2vec_file(cls,
                            file_path: str,
-                           binary: bool = True) -> Tuple[Vocab, np.ndarray]:
+                           binary: bool = True) -> Tuple['Vocab', np.ndarray]:
         """
         从word2vec格式文件读取词汇表
 
