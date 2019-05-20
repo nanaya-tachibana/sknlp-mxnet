@@ -2,7 +2,6 @@ import ctypes
 from multiprocessing import current_process
 from typing import IO
 
-import gluonnlp
 import mxnet as mx
 import numpy as np
 import pandas as pd

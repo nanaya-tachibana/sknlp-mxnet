@@ -15,7 +15,6 @@ from .base import DeepModel
 from .data import ClassifyDataset, InMemoryDataset, Pad
 from .embedding import NonContextEmbeddingLayer
 from .encode import TextCNN, TextRCNN, TextRNN
-from .loss import SampledSigmoidBCELoss
 from .segmenter import Segmenter
 
 logger = logging.getLogger(__name__)
@@ -131,29 +130,32 @@ class DeepClassifier(DeepModel):
         )
 
     def _calculate_loss(self, batch_inputs, batch_mask, batch_labels):
-        # batch_label_mask = mx.nd.where(
-        #     batch_labels == 1, batch_labels, mx.nd.where(
-        #         mx.nd.broadcast_lesser_equal(
-        #             mx.nd.random_uniform(shape=batch_labels.shape),
-        #             self.label_weights
-        #         ),
-        #         mx.nd.ones_like(batch_labels),
-        #         mx.nd.zeros_like(batch_labels)
-        #     )
-        # )
         return self._loss(
-            self._calculate_logits(
-                batch_inputs.transpose(axes=(1, 0)),
-                batch_mask.transpose(axes=(1, 0))
-            ),
+            self._calculate_logits(batch_inputs, batch_mask),
             batch_labels.astype(dtype='float32'),
         )
 
     def _batchify_fn(self):
-        return gluonnlp.data.batchify.Tuple(
-            Pad(axis=0, pad_val=1), Pad(axis=0),
-            gluonnlp.data.batchify.Stack()
-        )
+
+        def batchify(one_batch):
+            (batch_inputs, batch_length), batch_labels = \
+                gluonnlp.data.batchify.Tuple(
+                    Pad(axis=0, pad_val=self._vocab['<pad>'], ret_length=True),
+                    gluonnlp.data.batchify.Stack()
+            )(one_batch)
+            batch_inputs = batch_inputs.transpose(axes=(1, 0))
+            batch_mask = mx.nd.SequenceMask(
+                mx.nd.ones_like(batch_inputs),
+                sequence_length=batch_length.astype('float32'),
+                use_sequence_length=True
+            )
+            return (
+                batch_inputs.as_in_context(self._ctx),
+                batch_mask.as_in_context(self._ctx),
+                batch_labels.as_in_context(self._ctx)
+            )
+
+        return batchify
 
     def predict(
         self, X=None, dataset=None, batch_size=512, return_origin_label=True
@@ -167,13 +169,9 @@ class DeepClassifier(DeepModel):
         dataloader = self._build_dataloader(dataset, batch_size, False, 'keep')
 
         predictions = []
-        for (batch_inputs, batch_mask, _) in dataloader:
-            batch_inputs = batch_inputs.as_in_context(self._ctx)
-            batch_mask = batch_mask.as_in_context(self._ctx)
-            logits = self._calculate_logits(
-                batch_inputs.transpose(axes=(1, 0)),
-                batch_mask.transpose(axes=(1, 0))
-            )
+        for one_batch in dataloader:
+            batch_inputs, batch_mask, _ = one_batch
+            logits = self._calculate_logits(batch_inputs, batch_mask)
             predictions.extend(self._decode(logits.asnumpy()))
         if return_origin_label:
             if self._is_multilabel:
@@ -185,7 +183,7 @@ class DeepClassifier(DeepModel):
         assert self._trained
         dataset = self._get_or_build_dataset(dataset, X, y)
         predictions = self.predict(dataset=dataset, return_origin_label=False)
-        y = [label for _, _, label in dataset]
+        y = [label for _, label in dataset]
         if not self._is_multilabel:
             y = [np.argmax(label) for label in y]
         y = np.vstack(y)
@@ -257,10 +255,9 @@ class TextCNNClassifier(DeepClassifier):
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
         max_length=100, embed_size=100, threshold=None,
-        num_filters=(25, 50, 75, 100, 125, 150),
-        ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
-        num_highway=1, conv_layer_activation='tanh', dropout=0.5,
-        ctx=mx.cpu(), **kwargs
+        num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
+        conv_layer_activation='tanh', num_highway=1, num_fc_layers=2,
+        fc_hidden_size=512, fc_activation='tanh', ctx=mx.cpu(), **kwargs
     ):
         if encode_layer is None:
             encode_layer = TextCNN(
@@ -268,9 +265,10 @@ class TextCNNClassifier(DeepClassifier):
                 num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
-                output_size=num_classes,
-                dropout=dropout,
                 num_highway=num_highway,
+                num_fc_layers=num_fc_layers,
+                fc_hidden_size=fc_hidden_size,
+                output_size=num_classes,
                 prefix='encode_'
             )
         super().__init__(
@@ -282,22 +280,45 @@ class TextCNNClassifier(DeepClassifier):
         self._num_filters = num_filters
         self._ngram_filter_sizes = ngram_filter_sizes
         self._conv_layer_activation = conv_layer_activation
-        self._dropout = dropout
         self._num_highway = num_highway
+        self._num_fc_layers = num_fc_layers
+        self._fc_hidden_size = fc_hidden_size
+        self._fc_activation = fc_activation
 
         self.meta.update({
             'num_filters': list(self._num_filters),
             'ngram_filter_sizes': list(self._ngram_filter_sizes),
             'conv_layer_activation': self._conv_layer_activation,
-            'dropout': self._dropout,
-            'num_highway': self._num_highway})
+            'num_highway': self._num_highway,
+            'num_fc_layers': self._num_fc_layers,
+            'fc_hidden_size': self._fc_hidden_size,
+            'fc_activation': self._fc_activation
+        })
 
     def _batchify_fn(self):
-        return gluonnlp.data.batchify.Tuple(
-            Pad(axis=0, pad_val=1, min_length=max(self._ngram_filter_sizes)),
-            Pad(axis=0, min_length=max(self._ngram_filter_sizes)),
-            gluonnlp.data.batchify.Stack()
-        )
+
+        def batchify(one_batch):
+            (batch_inputs, batch_length), batch_labels = \
+                gluonnlp.data.batchify.Tuple(
+                    Pad(
+                        axis=0, pad_val=self._vocab['<pad>'], ret_length=True,
+                        min_length=max(self._ngram_filter_sizes)
+                    ),
+                    gluonnlp.data.batchify.Stack()
+            )(one_batch)
+            batch_inputs = batch_inputs.transpose(axes=(1, 0))
+            batch_mask = mx.nd.SequenceMask(
+                mx.nd.ones_like(batch_inputs),
+                sequence_length=batch_length.astype('float32'),
+                use_sequence_length=True
+            )
+            return (
+                batch_inputs.as_in_context(self._ctx),
+                batch_mask.as_in_context(self._ctx),
+                batch_labels.as_in_context(self._ctx)
+            )
+
+        return batchify
 
     @classmethod
     def _load_encode_layer(cls, file_path, prefix, ctx):
@@ -310,13 +331,21 @@ class TextRNNClassifier(DeepClassifier):
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
         max_length=100, embed_size=100, threshold=None,
-        hidden_size=512, num_rnn_layers=1, output_size=1, dropout=0.5,
-        dense_connection='last', ctx=mx.cpu(), **kwargs
+        num_rnn_layers=1, projection_size=128, hidden_size=1024,
+        cell_clip=3, projection_clip=3, dropout=0.5, dense_connection='last',
+        num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
+        ctx=mx.cpu(), **kwargs
     ):
         if encode_layer is None:
             encode_layer = TextRNN(
-                hidden_size=hidden_size,
                 num_rnn_layers=num_rnn_layers,
+                projection_size=projection_size,
+                hidden_size=hidden_size,
+                cell_clip=cell_clip,
+                projection_clip=projection_clip,
+                fc_activation=fc_activation,
+                num_fc_layers=num_fc_layers,
+                fc_hidden_size=fc_hidden_size,
                 dropout=dropout,
                 dense_connection=dense_connection,
                 output_size=num_classes,
@@ -328,16 +357,28 @@ class TextRNNClassifier(DeepClassifier):
             vocab=vocab, segmenter=segmenter,
             max_length=max_length, embed_size=embed_size,
             threshold=threshold, **kwargs)
-        self._hidden_size = hidden_size
         self._num_rnn_layers = num_rnn_layers
+        self._projection_size = projection_size
+        self._hidden_size = hidden_size
+        self._cell_clip = cell_clip
+        self._projection_clip = projection_clip
         self._dropout = dropout
         self._dense_connection = dense_connection
+        self._num_fc_layers = num_fc_layers
+        self._fc_hidden_size = fc_hidden_size
+        self._fc_activation = fc_activation
 
         self.meta.update({
-            'hidden_size': hidden_size,
-            'num_rnn_layers': num_rnn_layers,
-            'dropout': dropout,
-            'dense_connection': dense_connection
+            'num_rnn_layers': self._num_rnn_layers,
+            'projection_size': self._projection_size,
+            'hidden_size': self._hidden_size,
+            'cell_clip': self._cell_clip,
+            'projection_clip': self._projection_clip,
+            'dropout': self._dropout,
+            'dense_connection': self._dense_connection,
+            'num_fc_layers': self._num_fc_layers,
+            'fc_hidden_size': self._fc_hidden_size,
+            'fc_activation': self._fc_activation
         })
 
     @classmethod
@@ -351,22 +392,24 @@ class TextRCNNClassifier(DeepClassifier):
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
         max_length=100, embed_size=100, threshold=None,
-        num_filters=(25, 50, 75, 100, 125, 150),
-        ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
-        conv_layer_activation='tanh', rnn_hidden_size=512, num_rnn_layers=1,
-        dropout=0.5, num_highway=1, ctx=mx.cpu(), **kwargs
+        num_rnn_layers=1, projection_size=128, hidden_size=1024,
+        cell_clip=3, projection_clip=3, dropout=0.5, kmax=2,
+        num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
+        ctx=mx.cpu(), **kwargs
     ):
         if encode_layer is None:
             encode_layer = TextRCNN(
-                embed_size=embed_size,
-                num_filters=num_filters,
-                ngram_filter_sizes=ngram_filter_sizes,
-                conv_layer_activation=conv_layer_activation,
-                output_size=num_classes,
-                dropout=dropout,
-                num_highway=num_highway,
-                rnn_hidden_size=rnn_hidden_size,
                 num_rnn_layers=num_rnn_layers,
+                projection_size=projection_size,
+                hidden_size=hidden_size,
+                cell_clip=cell_clip,
+                projection_clip=projection_clip,
+                kmax=kmax,
+                num_fc_layers=num_fc_layers,
+                fc_hidden_size=fc_hidden_size,
+                fc_activation=fc_activation,
+                dropout=dropout,
+                output_size=num_classes,
                 prefix='encode_'
             )
         super().__init__(
@@ -375,30 +418,29 @@ class TextRCNNClassifier(DeepClassifier):
             vocab=vocab, segmenter=segmenter,
             max_length=max_length, embed_size=embed_size,
             threshold=threshold, **kwargs)
-        self._num_filters = num_filters
-        self._ngram_filter_sizes = ngram_filter_sizes
-        self._conv_layer_activation = conv_layer_activation
-        self._dropout = dropout
-        self._num_highway = num_highway
-        self._rnn_hidden_size = rnn_hidden_size
         self._num_rnn_layers = num_rnn_layers
+        self._projection_size = projection_size
+        self._hidden_size = hidden_size
+        self._cell_clip = cell_clip
+        self._projection_clip = projection_clip
+        self._kmax = kmax
         self._dropout = dropout
+        self._num_fc_layers = num_fc_layers
+        self._fc_hidden_size = fc_hidden_size
+        self._fc_activation = fc_activation
 
         self.meta.update({
-            'num_filters': list(self._num_filters),
-            'ngram_filter_sizes': list(self._ngram_filter_sizes),
-            'conv_layer_activation': self._conv_layer_activation,
+            'num_rnn_layers': self._num_rnn_layers,
+            'projection_size': self._projection_size,
+            'hidden_size': self._hidden_size,
+            'cell_clip': self._cell_clip,
+            'projection_clip': self._projection_clip,
+            'kmax': self._kmax,
             'dropout': self._dropout,
-            'num_highway': self._num_highway,
-            'rnn_hidden_size': rnn_hidden_size,
-            'num_rnn_layers': num_rnn_layers,
+            'num_fc_layers': self._num_fc_layers,
+            'fc_hidden_size': self._fc_hidden_size,
+            'fc_activation': self._fc_activation
         })
-
-    def _batchify_fn(self):
-        return gluonnlp.data.batchify.Tuple(
-            Pad(axis=0, pad_val=1, min_length=max(self._ngram_filter_sizes)),
-            Pad(axis=0, min_length=max(self._ngram_filter_sizes)),
-            gluonnlp.data.batchify.Stack())
 
     @classmethod
     def _load_encode_layer(cls, file_path, prefix, ctx):

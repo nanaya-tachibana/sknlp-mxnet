@@ -97,9 +97,27 @@ class DeepTagger(DeepModel):
         return decoder
 
     def _batchify_fn(self):
-        return gluonnlp.data.batchify.Tuple(
-            Pad(axis=0, pad_val=1), Pad(axis=0),
-            Pad(axis=0, pad_val=self._label2idx['O']))
+
+        def batchify(one_batch):
+            (batch_inputs, batch_length), batch_labels = \
+                gluonnlp.data.batchify.Tuple(
+                    Pad(axis=0, pad_val=self._vocab['<pad>'], ret_length=True),
+                    Pad(axis=0), Pad(axis=0, pad_val=self._label2idx['O'])
+            )(one_batch)
+            batch_inputs = batch_inputs.transpose(axes=(1, 0))
+            batch_mask = mx.nd.SequenceMask(
+                mx.nd.ones_like(batch_inputs),
+                sequence_length=batch_length.astype('float32'),
+                use_sequence_length=True
+            )
+            batch_labels = batch_labels.transpose(axes=(1, 0))
+            return (
+                batch_inputs.as_in_context(self._ctx),
+                batch_mask.as_in_context(self._ctx),
+                batch_labels.as_in_context(self._ctx)
+            )
+
+        return batchify
 
     def predict(self, X=None, dataset=None, batch_size=512,
                 return_origin_label=True):

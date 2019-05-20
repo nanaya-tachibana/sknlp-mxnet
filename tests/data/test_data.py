@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from sknlp.data.data import SimpleIndexedRecordIO
+from sknlp.data import SimpleIndexedRecordIO
 
 
 class TestSimpleIndexedRecordIO:

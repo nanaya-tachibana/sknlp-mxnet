@@ -2,7 +2,6 @@ import collections
 import os
 from typing import Dict, List, Tuple, Sequence, Optional, Callable, Union
 
-import mxnet as mx
 from mxnet.gluon.data.dataset import Dataset
 
 from sklearn.preprocessing import MultiLabelBinarizer
@@ -95,7 +94,7 @@ class NLPDataset:
         label_counter = collections.Counter()
         for i in range(n_samples):
             row = dataset[i]
-            text, label = self._split_row(row, ignore_other=True)
+            text, label = self._split_row(row, ignore_others=True)
             if vocab is None:
                 token_counter.update(self._segmenter(text))
             if label2idx is None:
@@ -124,12 +123,12 @@ class NLPDataset:
             )
 
     def _split_row(
-            self, row: str, ignore_other: bool = True
+        self, row: str, ignore_others: bool = False
     ) -> Union[Tuple[str, str], Tuple[str, str, List[str]]]:
         cells = row.split('\t')
         if len(cells) == 1:
             return cells[0], ''
-        elif ignore_other:
+        elif ignore_others or len(cells) == 2:
             return cells[0], cells[1]
         else:
             return cells[0], cells[1], cells[2:]
@@ -141,21 +140,20 @@ class NLPDataset:
         return [self._label2idx[l] for l in label.split('|')]
 
     def _preprocess_func(
-        self, text: str, label: str
-    ) -> Tuple[List[int], List[int], List[int]]:
+        self, text: str, label: str, *args
+    ) -> Tuple[List[int], List[int], List[str]]:
         processed_text = self._preprocess_text(text)
         processed_label = self._preprocess_label(label)
-        mask = [1] * len(processed_text)
-        return processed_text, mask, processed_label
+        if len(args) > 0:
+            return processed_text, processed_label, args[0]
+        else:
+            return processed_text, processed_label
 
     def idx2tokens(self, idx_list: List[int]) -> List[str]:
         return self._vocab.to_tokens(idx_list)
 
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[List[int], List[int], List[int]]:
-        text, label = self._split_row(self._dataset[idx])
-        return self._preprocess_func(text, label)
+    def __getitem__(self, idx: int) -> Tuple[List[int], List[int], List[str]]:
+        return self._preprocess_func(*self._split_row(self._dataset[idx]))
 
     def __len__(self) -> int:
         return len(self._dataset)

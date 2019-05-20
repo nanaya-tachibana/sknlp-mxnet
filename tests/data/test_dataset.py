@@ -1,9 +1,11 @@
 import os
 
 from sknlp.vocab import Vocab
-from sknlp.data.data import SimpleIndexedRecordIO
-from sknlp.data.dataset import (ClassifyDataset, InMemoryDataset, NLPDataset,
-                                RecordFileDataset, SequenceTagDataset)
+from sknlp.data import SimpleIndexedRecordIO
+from sknlp.data import (
+    ClassifyDataset, InMemoryDataset, NLPDataset,
+    RecordFileDataset, SequenceTagDataset
+)
 
 
 class TestDataset:
@@ -56,7 +58,7 @@ class TestNLPDataset(TestDataset):
     def test_dataset(self, tmp_path):
         nlp_dataset = NLPDataset(self.dataset)
         assert len(nlp_dataset) == 3
-        assert nlp_dataset[0] == ([5, 7, 4], [1, 1, 1], [0, 1], ['o1', 'i1'])
+        assert nlp_dataset[0] == ([5, 7, 4], [0, 1], ['o1', 'i1'])
 
     def test_custom_settings(self):
         nlp_dataset = NLPDataset(
@@ -67,22 +69,18 @@ class TestNLPDataset(TestDataset):
             }),
             label2idx={'1': 2, '2': 0, '3': 1}
         )
-        assert nlp_dataset[0] == (
-            [4, 5, 6], [1, 1, 1], [2, 0], ['o1', 'i1']
-        )
+        assert nlp_dataset[0] == ([4, 5, 6], [2, 0], ['o1', 'i1'])
 
     def test_max_length(self):
         nlp_dataset = NLPDataset(self.dataset, max_length=2)
-        assert nlp_dataset[0] == (
-            [5, 7], [1, 1], [0, 1], ['o1', 'i1']
-        )
+        assert nlp_dataset[0] == ([5, 7], [0, 1], ['o1', 'i1'])
 
 
 class TestClassifyDataset(TestNLPDataset):
 
     def test_dataset(self, tmp_path):
         c_dataset = ClassifyDataset(self.dataset)
-        assert c_dataset[0] == ([5, 7, 4], [1, 1, 1], [1, 1, 0], ['o1', 'i1'])
+        assert c_dataset[0] == ([5, 7, 4], [1, 1, 0], ['o1', 'i1'])
         assert c_dataset.idx2labels([0, 8]) == ['1']
 
 
@@ -97,5 +95,5 @@ class TestSequenceTagDataset(TestDataset):
 
     def test_dataset(self, tmp_path):
         s_dataset = SequenceTagDataset(self.dataset)
-        assert s_dataset[0] == ([5, 7, 4], [1, 1, 1], [0, 1, 2], ['o1', 'i1'])
+        assert s_dataset[0] == ([5, 7, 4], [0, 1, 2], ['o1', 'i1'])
         assert s_dataset.idx2labels([0, 10]) == ['1', 'O']
