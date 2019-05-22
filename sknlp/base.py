@@ -140,6 +140,18 @@ class BaseModel:
         """
         raise NotImplementedError('valid log function is not implemented.')
 
+    def _batchify_fn(self):
+        raise NotImplementedError('_batchify_fn is not implemented.')
+
+    def _build_dataloader(
+        self, dataset, batch_size, shuffle=True, last_batch='keep'
+    ):
+        return mx.gluon.data.DataLoader(dataset=dataset,
+                                        batch_size=batch_size,
+                                        shuffle=shuffle,
+                                        last_batch=last_batch,
+                                        batchify_fn=self._batchify_fn())
+
     def save(self, file_path: str) -> None:
         raise NotImplementedError('save model function is not implemented.')
 
@@ -148,7 +160,7 @@ class BaseModel:
         raise NotImplementedError('load model function is not implemented.')
 
 
-class DeepModel(BaseModel):
+class DeepSupervisedModel(BaseModel):
 
     def __init__(self, vocab=None, label2idx=None, ctx=mx.cpu(), **kwargs):
         super().__init__(ctx, **kwargs)
@@ -170,17 +182,6 @@ class DeepModel(BaseModel):
         self.embedding_layer.hybridize()
         self.encode_layer.hybridize()
         self._loss.hybridize()
-
-    def _batchify_fn(self):
-        raise NotImplementedError('_batchify_fn is not implemented.')
-
-    def _build_dataloader(self, dataset, batch_size,
-                          shuffle=True, last_batch='keep'):
-        return mx.gluon.data.DataLoader(dataset=dataset,
-                                        batch_size=batch_size,
-                                        shuffle=shuffle,
-                                        last_batch=last_batch,
-                                        batchify_fn=self._batchify_fn())
 
     def _get_or_build_dataset(self, dataset, X, y):
         """

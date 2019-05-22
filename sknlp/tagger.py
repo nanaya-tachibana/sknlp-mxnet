@@ -11,7 +11,7 @@ from sklearn.metrics import precision_recall_fscore_support
 
 import gluonnlp
 
-from .base import DeepModel
+from .base import DeepSupervisedModel
 from .data import Pad, InMemoryDataset, SequenceTagDataset
 from .embedding import NonContextEmbeddingLayer
 from .crf import Crf, viterbi_decode
@@ -20,7 +20,7 @@ from .encode import TextRNN
 logger = logging.getLogger(__name__)
 
 
-class DeepTagger(DeepModel):
+class DeepTagger(DeepSupervisedModel):
 
     def __init__(
         self, num_tags, encode_layer, embedding_layer=None, label2idx=None,

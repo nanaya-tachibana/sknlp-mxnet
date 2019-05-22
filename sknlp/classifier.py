@@ -11,7 +11,7 @@ import numpy as np
 from scipy.special import expit
 from sklearn.metrics import precision_recall_fscore_support
 
-from .base import DeepModel
+from .base import DeepSupervisedModel
 from .data import ClassifyDataset, InMemoryDataset, Pad
 from .embedding import NonContextEmbeddingLayer
 from .encode import TextCNN, TextRCNN, TextRNN
@@ -30,7 +30,7 @@ def _decode(logits, threshold, is_binary=False, is_multilabel=False):
         return np.argmax(logits, axis=1)
 
 
-class DeepClassifier(DeepModel):
+class DeepClassifier(DeepSupervisedModel):
 
     def __init__(
         self, num_classes, encode_layer, embedding_layer=None,
