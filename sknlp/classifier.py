@@ -108,9 +108,9 @@ class DeepClassifier(DeepSupervisedModel):
             segmenter=self._cut, max_length=self._max_length
         )
 
-    def _decode(self, x):
+    def _decode(self, x, threshold):
         threshold = np.array([
-            self._threshold.get(l, 0.5)
+            threshold.get(l, 0.5)
             for l in self.idx2labels(range(self._num_classes))
         ])
         return _decode(
@@ -158,10 +158,13 @@ class DeepClassifier(DeepSupervisedModel):
         return functools.partial(batchify, vocab[vocab.padding_token])
 
     def predict(
-        self, X=None, dataset=None, batch_size=512, return_origin_label=True
+        self, X=None, dataset=None, batch_size=512,
+        threshold=None, return_origin_label=True
     ):
         assert self._trained
         assert dataset or X
+        if threshold is None:
+            threshold = self._threshold
 
         if dataset is None:
             dataset = self._get_or_build_dataset(dataset, X, ['O'] * len(X))
@@ -173,7 +176,7 @@ class DeepClassifier(DeepSupervisedModel):
             for logits in self._forward(
                 self._calculate_logits, one_batch, self._ctx, batch_axis=1
             ):
-                predictions.extend(self._decode(logits.asnumpy()))
+                predictions.extend(self._decode(logits.asnumpy(), threshold))
         if return_origin_label:
             if self._is_multilabel:
                 predictions = self._debinarize(predictions)
