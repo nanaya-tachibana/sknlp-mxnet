@@ -1,25 +1,23 @@
 from typing import List, Union, Optional
+import math
 import mxnet as mx
-from mxnet import gluon
 from mxnet.gluon import nn
 
 
 HybridType = Union[mx.ndarray.NDArray, mx.symbol.Symbol]
 
 
-class FullSoftmax(gluon.HybridBlock):
+class FullSoftmax(nn.HybridBlock):
 
-    def __init__(
-        self, num_classes: int,
-        weight_initializer: Optional[mx.init.Initializer] = None, **kwargs
-    ) -> None:
+    def __init__(self, input_size: int, num_classes: int, **kwargs) -> None:
         super().__init__(**kwargs)
         with self.name_scope():
             self.dense_layer = nn.Dense(
                 num_classes, flatten=False,
-                weight_initializer=weight_initializer, prefix='proj_'
+                weight_initializer=mx.init.Normal(1 / math.sqrt(input_size)),
+                prefix='proj_'
             )
-            self.softmaxce = gluon.loss.SoftmaxCrossEntropyLoss()
+            self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
     def hybrid_forward(
         self, F, inputs: HybridType, labels: HybridType
@@ -28,7 +26,7 @@ class FullSoftmax(gluon.HybridBlock):
         return self.softmaxce(logits, labels)
 
 
-class AdaptiveSoftmax(gluon.HybridBlock):
+class AdaptiveSoftmax(nn.HybridBlock):
     """
     Parameters
     ----------
@@ -49,12 +47,10 @@ class AdaptiveSoftmax(gluon.HybridBlock):
 
     def __init__(
         self, input_size: int, num_classes: int, cutoffs: List[int],
-        div_factor: int = 4,
-        weight_initializer: Optional[mx.init.Initializer] = None,
-        **kwargs
+        div_factor: int = 4, **kwargs
     ) -> None:
         super().__init__(**kwargs)
-
+        cutoffs = list(cutoffs)
         if (cutoffs != sorted(cutoffs)
             or min(cutoffs) < 0
             or max(cutoffs) > num_classes
@@ -79,26 +75,31 @@ class AdaptiveSoftmax(gluon.HybridBlock):
             head_size = self._cutoffs[0] + self._num_clusters
             self.head_layer = nn.Dense(
                 head_size, flatten=False, use_bias=False,
-                weight_initializer=weight_initializer, prefix='head_'
+                weight_initializer=mx.init.Normal(1 / math.sqrt(input_size)),
+                prefix='head_'
             )
             for i in range(self._num_clusters):
-                self.tail_layers: List[mx.gluon.HybridBlock] = []
-                tail_layer = nn.HybridSequential(prefix=f'tail{i}_')
-                with tail_layer.name_scope():
-                    tail_layer.add(nn.Dense(
-                        projection_sizes[i], flatten=False, use_bias=False,
-                        weight_initializer=weight_initializer, prefix='proj_'
-                    ))
-                    tail_layer.add(nn.Dense(
-                        self._cutoffs[i + 1] - self._cutoffs[i],
-                        flatten=False, use_bias=False,
-                        weight_initializer=weight_initializer, prefix='w_'
-                    ))
-                self.tail_layers.append(tail_layer)
-                # Note that Blocks inside the list, tuple or dict will
-                # not be registered automatically
-                self.register_child(tail_layer)
-            self.softmaxce = gluon.loss.SoftmaxCrossEntropyLoss()
+                self.tail_layers = nn.HybridSequential(prefix='tail_layers')
+                with self.tail_layers.name_scope():
+                    tail_layer = nn.HybridSequential(prefix=f'tail{i}_')
+                    with tail_layer.name_scope():
+                        tail_layer.add(nn.Dense(
+                            projection_sizes[i], flatten=False, use_bias=False,
+                            weight_initializer=mx.init.Normal(
+                                1 / math.sqrt(input_size)
+                            ),
+                            prefix='proj_'
+                        ))
+                        tail_layer.add(nn.Dense(
+                            self._cutoffs[i + 1] - self._cutoffs[i],
+                            flatten=False, use_bias=False,
+                            weight_initializer=mx.init.Normal(
+                                1 / math.sqrt(projection_sizes[i])
+                            ),
+                            prefix='w_'
+                        ))
+                    self.tail_layers.add(tail_layer)
+            self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
     def hybrid_forward(
         self, F, inputs: HybridType, labels: HybridType
@@ -113,9 +114,9 @@ class AdaptiveSoftmax(gluon.HybridBlock):
         ones = F.ones_like(labels)
         tail_loss = F.zeros_like(labels)
         for i in range(self._num_clusters):
-            mask = F.logical_and(
-                F.greater_equal(labels, self._cutoffs[i]),
-                F.lesser(labels, self._cutoffs[i + 1])
+            mask = F.broadcast_logical_and(
+                F.broadcast_greater_equal(labels, ones * self._cutoffs[i]),
+                F.broadcast_lesser(labels, ones * self._cutoffs[i + 1])
             )
             # update head labels
             head_labels = F.where(
@@ -130,7 +131,56 @@ class AdaptiveSoftmax(gluon.HybridBlock):
             # tail_labels = F.contrib.boolean_mask(labels - self._cutoffs[i], mask)
             tail_labels = labels - self._cutoffs[i]
             pred = F.log_softmax(tail_logits, axis=-1)
-            F.where(mask, -F.pick(pred, tail_labels), tail_loss, out=tail_loss)
+            tail_loss = F.where(
+                mask, -F.pick(pred, tail_labels), tail_loss,
+            )
         head_logits = self.head_layer(inputs)
         head_loss = self.softmaxce(head_logits, head_labels)
         return head_loss + tail_loss
+
+
+class ElmoLoss(nn.HybridBlock):
+
+    def __init__(self, loss_func, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.loss_func = loss_func
+
+    def hybrid_forward(
+        self, F,
+        inputs: HybridType,
+        mask: HybridType,
+        forward_labels: HybridType,
+        backward_labels: HybridType
+    ) -> HybridType:
+        # can't work with ndarray now
+        # last_layer = F.SequenceLast(inputs)
+        length = mask.sum(axis=0)
+        sequence_mask = F.reshape(
+            F.SequenceMask(
+                mask, sequence_length=length - 1, use_sequence_length=True
+            ),
+            shape=(-1, )
+        )
+        last_layer = F.squeeze(
+            F.slice_axis(inputs, begin=-1, end=None, axis=0), axis=0
+        )
+        forward_inputs, backward_inputs = F.split(
+            last_layer, axis=-1, num_outputs=2
+        )
+        forward_loss = self.loss_func(
+            F.reshape(forward_inputs, shape=(-3, -1)),
+            F.reshape(forward_labels, shape=(-1, ))
+        ) * sequence_mask
+
+        reversed_backward_inputs = F.SequenceMask(
+            backward_inputs, sequence_length=length, use_sequence_length=True
+        )
+        reversed_backward_labels = F.SequenceMask(
+            backward_labels, sequence_length=length, use_sequence_length=True
+        )
+        backward_loss = self.loss_func(
+            F.reshape(reversed_backward_inputs, shape=(-3, -1)),
+            F.reshape(reversed_backward_labels, shape=(-1, ))
+        ) * sequence_mask
+        return 0.5 * (forward_loss + backward_loss)

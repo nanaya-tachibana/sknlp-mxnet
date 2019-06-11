@@ -4,5 +4,6 @@ from .dataset import (
     ClassifyDataset, SequenceTagDataset
 )
 from .batchify import Pad, BPTTBatchify
+from .sampler import BPTTBatchSampler
 
 __all__ = ['Pad']

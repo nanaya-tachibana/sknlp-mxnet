@@ -1,5 +1,7 @@
+import math
 import logging
 import mxnet as mx
+
 from .data import NLPDataset
 
 logger = logging.getLogger(__name__)
@@ -7,8 +9,10 @@ logger = logging.getLogger(__name__)
 
 class BaseModel:
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, **kwargs):
         self._ctx = ctx
+        self._num_workers = 0
+        self._trained = False
         self._trainable = dict()
 
     def _fit(self, train_dataloader: mx.gluon.data.DataLoader,
@@ -21,7 +25,9 @@ class BaseModel:
              stop_factor_lr: float = 2e-6,
              clip: float = 5,
              checkpoint: str = None,
-             save_frequency: int = 1):
+             save_frequency: int = 1,
+             momentum: float = 0,
+    ):
         """
         Help function for model fitting.
 
@@ -62,11 +68,12 @@ class BaseModel:
         assert len(self._trainable) > 0, 'No trainable parameters'
 
         params_dict = self._collect_params()
-        trainer = mx.gluon.Trainer(params_dict,
-                                   optimizer,
-                                   {'learning_rate': lr,
-                                    'lr_scheduler': lr_scheduler})
+        optimizer_params = {'learning_rate': lr, 'lr_scheduler': lr_scheduler}
+        if optimizer == 'sgd':
+            optimizer_params['momentum'] = momentum
+        trainer = mx.gluon.Trainer(params_dict, optimizer, optimizer_params)
         for epoch in range(1, n_epochs + 1):
+            self._before_epoch()
             self._one_epoch(trainer, train_dataloader, epoch, clip=clip)
             self._trained = True
             if checkpoint is not None and epoch % save_frequency == 0:
@@ -81,42 +88,65 @@ class BaseModel:
             params_dict.update(self._trainable[t].collect_params())
         return params_dict
 
-    def _clip_gradient(self, clip):
+    def _clip_gradient(self, clip, ctx):
         params_dict = self._collect_params()
-        clip_params = [
-            p.data() for p in params_dict.values()
-        ]
-
-        norm = mx.nd.array([0.0], self._ctx)
-        for param in clip_params:
-            if param.grad is not None:
-                norm += (param.grad ** 2).sum()
-        norm = norm.sqrt().asscalar()
-        if norm > clip:
+        for context in ctx:
+            clip_params = [
+                p.data(context) for p in params_dict.values()
+            ]
+            norm = mx.nd.array([0.0], context)
             for param in clip_params:
                 if param.grad is not None:
-                    param.grad[:] *= clip / norm
+                    norm += (param.grad ** 2).sum()
+            norm = norm.sqrt().asscalar()
+            if norm > clip:
+                for param in clip_params:
+                    if param.grad is not None:
+                        param.grad[:] *= clip / norm
 
-    def _one_epoch(self, trainer, data_iter, epoch, clip=5.0):
-        loss_val = 0.0
-        n_batch = 0
+    def _forward(self, func, one_batch, ctx, batch_axis=1):
+        res = []
+        for one_part in zip(*[
+            mx.gluon.utils.split_and_load(
+                element, ctx, batch_axis=batch_axis
+            ) for element in one_batch
+        ]):
+            res.append(func(*one_part))
+        return res
+
+    def _forward_backward(self, one_batch, ctx, batch_axis=1):
+        with mx.autograd.record():
+            res = self._forward(
+                self._calculate_loss, one_batch, ctx, batch_axis
+            )
+            losses = [r[0] for r in res]
+        for loss in losses:
+            loss.backward()
+        return sum(loss.sum().asscalar() for loss in losses)
+
+    def _before_epoch(self, *arg, **kwargs):
+        pass
+
+    def _one_epoch(self, trainer, data_iter, epoch, clip=1.0):
+        total_loss = 0
+        num_batch = 0
         ctx = self._ctx
         for one_batch in data_iter:
-            one_batch = [element.as_in_context(ctx) for element in one_batch]
-            steps = one_batch[0].shape[0]
-
-            with mx.autograd.record():
-                loss = self._calculate_loss(*one_batch)
-            loss.backward()
-            self._clip_gradient(clip)
+            steps = one_batch[0].shape[1]
+            loss = self._forward_backward(one_batch, ctx, batch_axis=1)
+            self._clip_gradient(clip, ctx)
             trainer.step(steps, ignore_stale_grad=True)
-            batch_loss = loss.mean().asscalar()
-            n_batch += 1
-            loss_val += batch_loss
-            if n_batch % 100 == 0:
-                logger.info(f'epoch {epoch}, batch {n_batch}, '
-                            f'batch_train_loss: {batch_loss:.4}')
-        return loss_val / n_batch
+            batch_loss = self._batch_loss(loss, *one_batch)
+            num_batch += 1
+            total_loss += batch_loss
+            if num_batch % 100 == 0:
+                logger.info(
+                    f'epoch {epoch}, batch {num_batch}, '
+                    f'batch_train_loss: {batch_loss:.4}')
+        logger.info(f'train ppl: {round(math.exp(total_loss / num_batch), 2)}')
+
+    def _batch_loss(self, loss, *args):
+        return loss / args[0].shape[1]
 
     def _calculate_loss(self, *args):
         """
@@ -146,11 +176,14 @@ class BaseModel:
     def _build_dataloader(
         self, dataset, batch_size, shuffle=True, last_batch='keep'
     ):
-        return mx.gluon.data.DataLoader(dataset=dataset,
-                                        batch_size=batch_size,
-                                        shuffle=shuffle,
-                                        last_batch=last_batch,
-                                        batchify_fn=self._batchify_fn())
+        return mx.gluon.data.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            last_batch=last_batch,
+            batchify_fn=self._batchify_fn(),
+            num_workers=self._num_workers
+        )
 
     def save(self, file_path: str) -> None:
         raise NotImplementedError('save model function is not implemented.')
@@ -169,19 +202,11 @@ class DeepSupervisedModel(BaseModel):
         self._loss = None
         self.meta = dict()
 
-    def _build(self):
+    def _build(self, ctx):
         """
         Implement this function to build.
         """
         raise NotImplementedError('build is not implemented.')
-
-    def _initialize(self):
-        self.embedding_layer.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        self.encode_layer.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        self._loss.initialize(init=mx.init.Xavier(), ctx=self._ctx)
-        self.embedding_layer.hybridize()
-        self.encode_layer.hybridize()
-        self._loss.hybridize()
 
     def _get_or_build_dataset(self, dataset, X, y):
         """
@@ -195,7 +220,7 @@ class DeepSupervisedModel(BaseModel):
         last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
         update_steps_lr: int = 300, factor: float = 0.9,
         stop_factor_lr: float = 2e-6, clip=5.0, checkpoint=None,
-        save_frequency=1
+        save_frequency=1, num_workers=1
     ):
         """
         Fit model.
@@ -223,21 +248,17 @@ class DeepSupervisedModel(BaseModel):
         save_frequency: int
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
+        self._num_workers = num_workers
         train_dataset = self._get_or_build_dataset(train_dataset, X, y)
 
         self.idx2labels = train_dataset.idx2labels
-        self.label_weights = mx.nd.array(
-            train_dataset._label_weights, ctx=self._ctx
-        )
-
         if self._vocab is None:
             self._vocab = train_dataset._vocab
         if self._label2idx is None:
             self._label2idx = train_dataset._label2idx
             self.meta['label2idx'] = self._label2idx
         if not self._trained:
-            self._build()
-            self._initialize()
+            self._build(self._ctx)
 
         if valid_X and valid_y and valid_dataset is None:
             valid_dataset = self._get_or_build_dataset(

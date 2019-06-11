@@ -246,13 +246,15 @@ class BPTTBatchify:
             data_list = [d.tolist() for d in data]
         else:
             data_list = list(data)
-        tokens_list = [d + [self._eos_token] for d in data_list]
-        min_length = max(len(tokens) for tokens in tokens_list)
-        target_tokens_list = [tokens[1:] for tokens in tokens_list]
-        reverse_target_tokens_list = [[self._bos_token] + d for d in data_list]
-        _pad = Pad(pad_val=self._padding_token, min_length=min_length)
+        data_list = [
+            [self._bos_token] + d + [self._eos_token] for d in data_list
+        ]
+        target_list = [d[1:] + [self._bos_token] for d in data_list]
+        reversed_target_list = [[self._eos_token] + d[:-1] for d in data_list]
+        _pad = Pad(pad_val=self._padding_token)
+        _pad_with_length = Pad(pad_val=self._padding_token, ret_length=True)
         return (
-            _pad(tokens_list),
-            _pad(target_tokens_list),
-            _pad(reverse_target_tokens_list)
+            _pad_with_length(data_list),
+            _pad(target_list),
+            _pad(reversed_target_list)
         )

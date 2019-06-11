@@ -78,6 +78,78 @@ class NLPDataset:
         self,
         dataset: Dataset,
         vocab: Optional[Vocab] = None,
+        segmenter: Optional[Callable[[str], List[str]]] = None,
+        max_length: Optional[int] = 100
+    ) -> None:
+        self._dataset = dataset
+        if segmenter is None:
+            self._segmenter = list
+        else:
+            self._segmenter = segmenter
+        self._max_length = max_length
+
+        n_samples = len(dataset)
+        token_counter = collections.Counter()
+        self._lengths = []
+        for i in range(n_samples):
+            row = dataset[i]
+            text = row
+            if vocab is None:
+                words = self._segmenter(text)
+                self._lengths.append(len(words))
+                token_counter.update(words)
+        if vocab is None:
+            self._vocab = Vocab(token_counter)
+        else:
+            self._vocab = vocab
+
+    def _preprocess_text(self, text: str) -> List[int]:
+        return self._vocab[self._segmenter(text[:self._max_length])]
+
+    def _preprocess_func(self, text: str) -> List[int]:
+        return self._preprocess_text(text)
+
+    def idx2tokens(self, idx_list: List[int]) -> List[str]:
+        return self._vocab.to_tokens(idx_list)
+
+    @property
+    def sample_lengths(self):
+        if not self._lengths:
+            for i in range(len(self._dataset)):
+                text = self._dataset[i]
+                words = self._segmenter(text)
+                self._lengths.append(len(words))
+        return self._lengths
+
+    def __getitem__(self, idx: int) -> List[int]:
+        return self._preprocess_func(self._dataset[idx])
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+
+class SupervisedNLPDataset(NLPDataset):
+    """
+    实现了基本的NLP预处理, 来预处理``Dataset``.
+
+    Parameters
+    ----------
+    dataset: Dataset
+        数据集
+    vocab: gluonnlp.Vocab, optional
+        词汇表, 如果为None, 会根据数据集构建
+    label2idx: Dict[str, int], optional
+        标签2ID表, 如果为None, 会根据数据集构建
+    segmenters: Sequence[Callable[[str], List[str]]]
+        一组分词器
+    max_length: int, optional
+        文本截断长度
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        vocab: Optional[Vocab] = None,
         label2idx: Optional[Dict[str, int]] = None,
         segmenter: Optional[Callable[[str], List[str]]] = None,
         max_length: Optional[int] = 100
@@ -100,27 +172,18 @@ class NLPDataset:
             if label2idx is None:
                 labels = label.split('|')
                 label_counter.update(labels)
+        del label_counter['']
         if vocab is None:
             self._vocab = Vocab(token_counter)
         else:
             self._vocab = vocab
         if label2idx is None:
-            if '' in label_counter:
-                del label_counter['']
             label_list = list(label_counter.keys())
             label_list.sort()
             self._label2idx = dict(zip(label_list, range(len(label_list))))
         else:
             self._label2idx = label2idx
         self._idx2label = {v: k for k, v in self._label2idx.items()}
-
-        self._label_weights = [0] * len(self._label2idx)
-        for label in label_counter:
-            idx = self._label2idx[label]
-            odds = n_samples / label_counter[label] - 1
-            self._label_weights[idx] = min(
-                1, 1 / odds if odds > 0 else 1
-            )
 
     def _split_row(
         self, row: str, ignore_others: bool = False
@@ -149,17 +212,11 @@ class NLPDataset:
         else:
             return processed_text, processed_label
 
-    def idx2tokens(self, idx_list: List[int]) -> List[str]:
-        return self._vocab.to_tokens(idx_list)
-
     def __getitem__(self, idx: int) -> Tuple[List[int], List[int], List[str]]:
         return self._preprocess_func(*self._split_row(self._dataset[idx]))
 
-    def __len__(self) -> int:
-        return len(self._dataset)
 
-
-class ClassifyDataset(NLPDataset):
+class ClassifyDataset(SupervisedNLPDataset):
 
     def __init__(
         self,
@@ -183,7 +240,7 @@ class ClassifyDataset(NLPDataset):
         return [self._idx2label[i] for i in idx_list if i in self._idx2label]
 
 
-class SequenceTagDataset(NLPDataset):
+class SequenceTagDataset(SupervisedNLPDataset):
 
     def _preprocess_label(self, label: str) -> List[int]:
         return [

@@ -19,6 +19,8 @@ class Segmenter:
             self._method = jieba.lcut
         elif method == 'hanlp':
             self._method = lambda x: [s.word for s in HanLP.segment(x)]
+        elif method == 'space':
+            self._method = lambda x: x.split()
         else:
             self._method = list
 

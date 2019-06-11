@@ -7,9 +7,9 @@ from typing import Tuple
 class Vocab(gluonnlp.Vocab):
 
     @classmethod
-    def from_word2vec_file(cls,
-                           file_path: str,
-                           binary: bool = True) -> Tuple['Vocab', np.ndarray]:
+    def from_word2vec_file(
+        cls, file_path: str, binary: bool = True
+    ) -> Tuple['Vocab', np.ndarray]:
         """
         从word2vec格式文件读取词汇表
 
