@@ -72,6 +72,7 @@ class BaseModel:
         best_epoch = 0
         lr_decay = 1.0
         for epoch in range(1, n_epochs + 1):
+            lr_decay = 1.0
             if best_epoch != 0:
                 if epoch - best_epoch >= 5:
                     lr_decay = 0.5
