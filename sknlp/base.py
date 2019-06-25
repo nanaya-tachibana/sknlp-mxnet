@@ -70,7 +70,6 @@ class BaseModel:
         trainer = mx.gluon.Trainer(params_dict, optimizer, optimizer_params)
         best_score = 0.0
         best_epoch = 0
-        lr_decay = 1.0
         for epoch in range(1, n_epochs + 1):
             lr_decay = 1.0
             if best_epoch != 0:
