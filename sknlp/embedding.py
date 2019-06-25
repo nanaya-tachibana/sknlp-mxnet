@@ -241,12 +241,14 @@ class Token2vec(BaseModel):
     def load(cls, file_path, update=False, ctx=mx.cpu()):
         meta, model, vocab = cls._load(file_path, ctx)
         if not update:
-            for name, param in model.collect_params('embed_.*').items():
+            for name, param in model.collect_params().items():
                 param.grad_req = 'null'
             meta['loss'] = None
         else:
             sym_model = model
-            model = TokenEmbedding(vocab, meta['embed_size'])
+            model = TokenEmbedding(
+                vocab, meta['embed_size'], prefix=meta['prefix']
+            )
             model.initialize(ctx=ctx)
             model.weight.set_data(
                 sym_model.params.get(''.join([meta['prefix'], 'weight'])).data()

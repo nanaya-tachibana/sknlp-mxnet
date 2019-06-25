@@ -237,6 +237,8 @@ class DeepClassifier(DeepSupervisedModel):
             os.path.join(temp_dir, 'encode-symbol.json'), inputs,
             os.path.join(temp_dir, 'encode-0000.params'), ctx=ctx
         )
+        for name, param in encode_layer.collect_params().items():
+            param.grad_req = 'null'
         ins = cls(
             meta['num_classes'], encode_layer,
             embedding_layer=embedding_layer,

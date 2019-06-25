@@ -101,7 +101,7 @@ class DeepTagger(DeepSupervisedModel):
         p, r, f, _ = avg_score
         logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
                     f'{round(r * 100, 2)})')
-        return avg_score
+        return f
 
     def _calculate_logits(self, inputs, mask, *args):
         return self.encode_layer(self.embedding_layer(inputs), mask)
@@ -147,7 +147,7 @@ class DeepTagger(DeepSupervisedModel):
         assert self._trained
         dataset = self._get_or_build_dataset(dataset, X, y)
         predictions = self.predict(dataset=dataset, return_origin_label=False)
-        y = list(itertools.chain(*[label for _, _, label in dataset]))
+        y = list(itertools.chain(*[label for _, label in dataset]))
         predictions = list(itertools.chain(*predictions))
         return (
             precision_recall_fscore_support(
@@ -183,9 +183,11 @@ class DeepTagger(DeepSupervisedModel):
                 os.path.join(temp_dir, 'embedding.tar.gz'), update, ctx
             )
             encode_layer = nn.SymbolBlock.imports(
-                os.path.join(temp_dir, 'encode-symbol.json'), 'data',
+                os.path.join(temp_dir, 'encode-symbol.json'), ['data0', 'data1'],
                 os.path.join(temp_dir, 'encode-0000.params'), ctx=ctx
             )
+            for name, param in encode_layer.collect_params().items():
+                param.grad_req = 'null'
             loss = nn.SymbolBlock.imports(
                 os.path.join(temp_dir, 'crf_loss-symbol.json'),
                 ['data0', 'data1', 'data2'],
@@ -200,7 +202,7 @@ class DeepTagger(DeepSupervisedModel):
                 embed_size=meta['embed_size'], ctx=ctx
             )
         ins._decode = ins._create_decoder(
-            loss.params.get('transitions').data().asnumpy()
+            loss.params.get('crf_transitions').data().asnumpy()
         )
         ins._trained = True
         ins._build(ctx, initialize=False)
