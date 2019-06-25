@@ -185,6 +185,10 @@ class SupervisedNLPDataset(NLPDataset):
             self._label2idx = label2idx
         self._idx2label = {v: k for k, v in self._label2idx.items()}
 
+    @property
+    def idx2label(self):
+        return self._idx2label
+
     def _split_row(
         self, row: str, ignore_others: bool = False
     ) -> Union[Tuple[str, str], Tuple[str, str, List[str]]]:

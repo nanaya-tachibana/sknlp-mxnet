@@ -1,3 +1,4 @@
+import functools
 import itertools
 
 import os
@@ -6,18 +7,32 @@ import shutil
 import json
 import logging
 
+import numpy as np
 import mxnet as mx
+from mxnet.gluon import nn
 from sklearn.metrics import precision_recall_fscore_support
 
 import gluonnlp
 
 from .base import DeepSupervisedModel
 from .data import Pad, InMemoryDataset, SequenceTagDataset
-from .embedding import NonContextEmbeddingLayer
+from .utils.array import sequence_mask
+from .embedding import Token2vec
 from .crf import Crf, viterbi_decode
 from .encode import TextRNN
 
 logger = logging.getLogger(__name__)
+
+
+def batchify(input_padding, label_padding, one_batch):
+    (inputs, length), labels = gluonnlp.data.batchify.Tuple(
+        Pad(axis=0, pad_val=input_padding, ret_length=True),
+        Pad(axis=0, pad_val=label_padding)
+    )(one_batch)
+    inputs = inputs.transpose((1, 0))
+    mask = sequence_mask(np.ones_like(inputs), length.astype('int'))
+    labels = labels.transpose((1, 0))
+    return inputs, mask, labels
 
 
 class DeepTagger(DeepSupervisedModel):
@@ -45,20 +60,24 @@ class DeepTagger(DeepSupervisedModel):
             'embed_size': self._embed_size
         }
 
-    def _build(self):
+    def _build(self, ctx, initialize=True):
         if self.embedding_layer is None:
-            self.embedding_layer = NonContextEmbeddingLayer(
-                self._vocab, self._embed_size, prefix='embed_'
+            self.embedding_layer = Token2vec(
+                self._vocab, self._embed_size, loss=None, ctx=ctx
             )
-        self.meta['embedding_prefix'] = self.embedding_layer.prefix
-        self.meta['encode_prefix'] = self.encode_layer.prefix
-        self._loss = Crf(self._num_classes, prefix='crf_')
-        self.meta['crf_prefix'] = self._loss.prefix
+        self.loss = Crf(self._num_classes, prefix='crf_')
+        self.meta['crf_prefix'] = self.loss.prefix
         self._trainable = {
             'embedding': self.embedding_layer,
             'encode': self.encode_layer,
-            'loss': self._loss
+            'loss': self.loss
         }
+        if initialize:
+            self.embedding_layer._build(ctx, initialize=initialize)
+            self.encode_layer.initialize(init=mx.init.Xavier(), ctx=ctx)
+            self.loss.initialize(init=mx.init.Xavier(), ctx=ctx)
+        self.encode_layer.hybridize(static_alloc=True)
+        self.loss.hybridize(static_alloc=True)
 
     def _get_or_build_dataset(self, dataset, X, y):
         assert (X and y) or dataset
@@ -72,22 +91,24 @@ class DeepTagger(DeepSupervisedModel):
 
     def _valid_log(self, valid_dataset):
         self._decode = self._create_decoder(
-            self._loss.transitions.data().asnumpy())
-        scores = self.score(dataset=valid_dataset)
+            self.loss.transitions.data().asnumpy())
+        scores, avg_score = self.score(dataset=valid_dataset)
         for l, p, r, f, _ in zip(self.idx2labels(
                 list(range(self._num_classes))), *scores):
             logger.info(
                 f'label: {l} precision: {p}, recall: {r}, f1: {f}'
             )
+        p, r, f, _ = avg_score
+        logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
+                    f'{round(r * 100, 2)})')
+        return avg_score
 
-    def _calculate_loss(self, batch_inputs, batch_mask, batch_labels):
-        return -self._loss(
-            self.encode_layer(
-                self.embedding_layer(batch_inputs.transpose(axes=(1, 0)))
-            ),
-            batch_labels.transpose(axes=(1, 0)),
-            batch_mask.transpose(axes=(1, 0))
-        )
+    def _calculate_logits(self, inputs, mask, *args):
+        return self.encode_layer(self.embedding_layer(inputs), mask)
+
+    def _calculate_loss(self, inputs, mask, labels):
+        logits = self._calculate_logits(inputs, mask)
+        return -self.loss(logits, labels, mask), None
 
     def _create_decoder(self, transitions):
 
@@ -97,30 +118,13 @@ class DeepTagger(DeepSupervisedModel):
         return decoder
 
     def _batchify_fn(self):
+        input_padding = self._vocab[self._vocab.padding_token]
+        label_padding = self._label2idx['O']
+        return functools.partial(batchify, input_padding, label_padding)
 
-        def batchify(one_batch):
-            (batch_inputs, batch_length), batch_labels = \
-                gluonnlp.data.batchify.Tuple(
-                    Pad(axis=0, pad_val=self._vocab['<pad>'], ret_length=True),
-                    Pad(axis=0), Pad(axis=0, pad_val=self._label2idx['O'])
-            )(one_batch)
-            batch_inputs = batch_inputs.transpose(axes=(1, 0))
-            batch_mask = mx.nd.SequenceMask(
-                mx.nd.ones_like(batch_inputs),
-                sequence_length=batch_length.astype('float32'),
-                use_sequence_length=True
-            )
-            batch_labels = batch_labels.transpose(axes=(1, 0))
-            return (
-                batch_inputs.as_in_context(self._ctx),
-                batch_mask.as_in_context(self._ctx),
-                batch_labels.as_in_context(self._ctx)
-            )
-
-        return batchify
-
-    def predict(self, X=None, dataset=None, batch_size=512,
-                return_origin_label=True):
+    def predict(
+        self, X=None, dataset=None, batch_size=512, return_origin_label=True
+    ):
         assert self._trained
         assert dataset or X
         if dataset is None:
@@ -129,16 +133,12 @@ class DeepTagger(DeepSupervisedModel):
         dataloader = self._build_dataloader(dataset, batch_size, False, 'keep')
 
         predictions = []
-        for (batch_inputs, batch_mask, _) in dataloader:
-            batch_inputs = batch_inputs.as_in_context(self._ctx)
-            batch_mask = batch_mask.as_in_context(self._ctx)
-            logits = self.encode_layer(self.embedding_layer(
-                batch_inputs.transpose(axes=(1, 0))
-            ))
-            predictions.extend(self._decode(
-                logits.asnumpy(),
-                batch_mask.transpose(axes=(1, 0)).asnumpy()
-            ))
+        for one_batch in dataloader:
+            for logits in self._forward(
+                self._calculate_logits, one_batch, self._ctx, batch_axis=1
+            ):
+                mask = one_batch[1]
+                predictions.extend(self._decode(logits.asnumpy(), mask))
         if return_origin_label:
             return [self.idx2labels(idx) for idx in predictions]
         return predictions
@@ -149,29 +149,28 @@ class DeepTagger(DeepSupervisedModel):
         predictions = self.predict(dataset=dataset, return_origin_label=False)
         y = list(itertools.chain(*[label for _, _, label in dataset]))
         predictions = list(itertools.chain(*predictions))
-        return precision_recall_fscore_support(
-            y, predictions, labels=list(range(self._num_classes)))
+        return (
+            precision_recall_fscore_support(
+                y, predictions, labels=list(range(self._num_classes))
+            ),
+            precision_recall_fscore_support(
+                y, predictions, labels=list(range(self._num_classes)),
+                average='micro'
+            )
+        )
 
     def save(self, file_path: str) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             self.embedding_layer.save(os.path.join(temp_dir, 'embedding'))
-            self.encode_layer.save(os.path.join(temp_dir, 'encode'))
-            self._loss.save(os.path.join(temp_dir, 'crf_loss'))
+            self.encode_layer.export(os.path.join(temp_dir, 'encode'))
+            self.loss.export(os.path.join(temp_dir, 'crf_loss'))
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
             shutil.make_archive(file_path, 'gztar', temp_dir)
 
     @classmethod
-    def _load_embedding_layer(cls, file_path, prefix, update, ctx):
-        return NonContextEmbeddingLayer.load(
-            file_path, prefix=prefix, update=update, ctx=ctx
-        )
-
-    @classmethod
-    def _load_encode_layer(cls, file_path, prefix):
-        raise NotImplementedError(
-            'load encode layer func is not implemented.'
-        )
+    def _load_embedding_layer(cls, file_path, update, ctx):
+        return Token2vec.load(file_path, update=update, ctx=ctx)
 
     @classmethod
     def load(cls, file_path, update=False, ctx=mx.cpu()):
@@ -181,62 +180,73 @@ class DeepTagger(DeepSupervisedModel):
                 meta = json.loads(f.read())
 
             embedding_layer = cls._load_embedding_layer(
-                os.path.join(temp_dir, 'embedding.tar.gz'),
-                meta.pop('embedding_prefix'), update, ctx
+                os.path.join(temp_dir, 'embedding.tar.gz'), update, ctx
             )
-            encode_layer = cls._load_encode_layer(
-                os.path.join(temp_dir, 'encode.tar.gz'),
-                meta.pop('encode_prefix'), ctx
+            encode_layer = nn.SymbolBlock.imports(
+                os.path.join(temp_dir, 'encode-symbol.json'), 'data',
+                os.path.join(temp_dir, 'encode-0000.params'), ctx=ctx
             )
-            loss = Crf.load(
-                os.path.join(temp_dir, 'crf_loss.tar.gz'),
-                prefix=meta.pop('crf_prefix')
+            loss = nn.SymbolBlock.imports(
+                os.path.join(temp_dir, 'crf_loss-symbol.json'),
+                ['data0', 'data1', 'data2'],
+                os.path.join(temp_dir, 'crf_loss-0000.params'), ctx=ctx
             )
 
-            meta['ctx'] = ctx
-            meta['vocab'] = embedding_layer._vocab
-            meta['embedding_layer'] = embedding_layer
-            clf = cls(encode_layer, **meta)
-            clf.encode_layer = encode_layer
-        clf._decode = clf._create_decoder(
+            ins = cls(
+                meta['num_tags'], encode_layer,
+                embedding_layer=embedding_layer,
+                vocab=embedding_layer._vocab, label2idx=meta['label2idx'],
+                segmenter=meta['segmenter'], max_length=meta['max_length'],
+                embed_size=meta['embed_size'], ctx=ctx
+            )
+        ins._decode = ins._create_decoder(
             loss.params.get('transitions').data().asnumpy()
         )
-        clf._trained = True
-        return clf
+        ins._trained = True
+        ins._build(ctx, initialize=False)
+        return ins
 
 
 class TextRNNTagger(DeepTagger):
 
     def __init__(
-        self, num_tags, embedding_layer=None, label2idx=None, vocab=None,
-        segmenter=None, max_length=100, embed_size=100, hidden_size=512,
-        num_rnn_layers=1, output_size=1, dropout=0.5, dense_connection=None,
-        ctx=mx.cpu(), **kwargs
+        self, num_tags, encode_layer=None, embedding_layer=None,
+        label2idx=None, vocab=None, segmenter=None, max_length=100,
+        embed_size=100, num_rnn_layers=1, projection_size=128,
+        rnn_hidden_size=1024, cell_clip=3, projection_clip=3,
+        num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
+        dropout=0.5, ctx=mx.cpu(), **kwargs
     ):
-        encode_layer = TextRNN(
-            hidden_size=hidden_size,
-            num_rnn_layers=num_rnn_layers,
-            dropout=dropout,
-            dense_connection=dense_connection,
-            output_size=num_tags,
-            prefix='encode_'
-        )
+        if encode_layer is None:
+            encode_layer = TextRNN(
+                num_rnn_layers=num_rnn_layers,
+                projection_size=projection_size,
+                hidden_size=rnn_hidden_size,
+                cell_clip=cell_clip,
+                projection_clip=projection_clip,
+                fc_activation=fc_activation,
+                num_fc_layers=num_fc_layers,
+                fc_hidden_size=fc_hidden_size,
+                dropout=dropout,
+                dense_connection=None,
+                output_size=num_tags,
+                prefix='encode_'
+            )
         super().__init__(
             num_tags, encode_layer, embedding_layer=embedding_layer,
             label2idx=label2idx, vocab=vocab, segmenter=segmenter,
-            max_length=max_length, embed_size=embed_size, ctx=ctx, **kwargs)
-        self._hidden_size = hidden_size
-        self._num_rnn_layers = num_rnn_layers
-        self._dropout = dropout
-        self._dense_connection = dense_connection
-
+            max_length=max_length, embed_size=embed_size, ctx=ctx, **kwargs
+        )
         self.meta.update({
-            'hidden_size': hidden_size,
             'num_rnn_layers': num_rnn_layers,
+            'projection_size': projection_size,
+            'rnn_hidden_size': rnn_hidden_size,
+            'cell_clip': cell_clip,
+            'projection_clip': projection_clip,
             'dropout': dropout,
-            'dense_connection': dense_connection
+            'dense_connection': None,
+            'num_fc_layers': num_fc_layers,
+            'fc_hidden_size': fc_hidden_size,
+            'fc_activation': fc_activation
         })
-
-    @classmethod
-    def _load_encode_layer(cls, file_path, prefix, ctx):
-        return TextRNN.load(file_path, use_mask=False, prefix=prefix, ctx=ctx)
+        self.meta.update({'model_type': 'builtin-text_rnn_tagger'})

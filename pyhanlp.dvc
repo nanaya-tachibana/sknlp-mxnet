@@ -1,8 +1,0 @@
-md5: 6854d29aff0f0eec08d2ed73dc4b2a54
-wdir: .
-outs:
-- md5: 5b4389ba567c5cf96a06875b6f42dc5c.dir
-  path: pyhanlp
-  cache: true
-  metric: false
-  persist: false

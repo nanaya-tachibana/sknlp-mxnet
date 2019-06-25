@@ -64,7 +64,7 @@ class TextRNN(nn.HybridBlock):
 
     def __init__(
         self, num_rnn_layers=1, projection_size=128, hidden_size=1024,
-        cell_clip=3, projection_clip=3, dropout=0.0, dense_connection='last',
+        cell_clip=3, projection_clip=3, dropout=0.0, dense_connection=None,
         output_size=1, num_fc_layers=2, fc_hidden_size=512,
         fc_activation='relu', **kwargs
     ):

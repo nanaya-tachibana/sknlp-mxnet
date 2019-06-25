@@ -5,15 +5,17 @@ from gluonnlp.model.transformer import (
     _get_layer_norm, TransformerEncoderCell, _position_encoding_init
 )
 from gluonnlp.model.bert import BERTEncoderCell
+from mxnet.gluon.contrib.rnn import VariationalDropoutCell
 
 
 class BiLSTMWithClip(nn.HybridBlock):
 
     def __init__(
         self, num_layers, projection_size, hidden_size=1024, cell_clip=3,
-        projection_clip=3, skip_connection=True,
-        dropout=0.5, i2h_weight_initializer=None,
-        h2h_weight_initializer=None, h2r_weight_initializer=None,
+        projection_clip=3, dropout=0.5,
+        i2h_weight_initializer=mx.initializer.Orthogonal(),
+        h2h_weight_initializer=mx.initializer.Orthogonal(),
+        h2r_weight_initializer=mx.initializer.Orthogonal(),
         i2h_bias_initializer='zeros', h2h_bias_initializer='zeros',
         input_size=0, return_all_layers=False, prefix='bilstm_', **kwargs
     ):
@@ -22,6 +24,7 @@ class BiLSTMWithClip(nn.HybridBlock):
         self._return_all_layers = return_all_layers
         self._projection_size = projection_size
         self._hidden_size = hidden_size
+        self._dropout = dropout
         self._layout = 'LNC'
         with self.name_scope():
             self.forward_layers = rnn.HybridSequentialRNNCell(
@@ -50,9 +53,21 @@ class BiLSTMWithClip(nn.HybridBlock):
                                 h2h_bias_initializer=h2h_bias_initializer,
                                 input_size=lstm_input_size,
                             )
+                            if dropout != 0:
+                                if i != num_layers - 1:
+                                    cell = VariationalDropoutCell(
+                                        cell,
+                                        drop_inputs=dropout,
+                                        drop_states=dropout
+                                    )
+                                else:
+                                    cell = VariationalDropoutCell(
+                                        cell,
+                                        drop_inputs=dropout,
+                                        drop_states=dropout,
+                                        drop_outputs=dropout
+                                    )
                             stack_cell.add(cell)
-                            if i != num_layers - 1 and dropout != 0:
-                                stack_cell.add(rnn.DropoutCell(dropout))
                         layers.add(stack_cell)
                         lstm_input_size = projection_size * 2
 
@@ -179,8 +194,10 @@ class BiLSTMWithClip(nn.HybridBlock):
                 layer_inputs = F.concat(
                     outputs_forward[layer_index - 1],
                     outputs_backward[layer_index - 1],
-                    dim=-1,
+                    dim=-1
                 )
+            if self._dropout != 0:
+                self.forward_layers[layer_index][0].reset()
             output, states_forward[layer_index] = F.contrib.foreach(
                 self.forward_layers[layer_index],
                 layer_inputs,
@@ -197,6 +214,8 @@ class BiLSTMWithClip(nn.HybridBlock):
                 )
             else:
                 layer_inputs = F.SequenceReverse(layer_inputs, axis=0)
+            if self._dropout != 0:
+                self.backward_layers[layer_index][0].reset()
             output, states_backward[layer_index] = F.contrib.foreach(
                 self.backward_layers[layer_index],
                 layer_inputs,

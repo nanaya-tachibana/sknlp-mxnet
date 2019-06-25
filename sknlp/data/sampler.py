@@ -1,25 +1,20 @@
-import random
 import numpy as np
-import mxnet as mx
 from mxnet.gluon.data.sampler import RandomSampler, SequentialSampler
 
-from gluonnlp.data.stream import _ProcessPrefetcher
 
-
-class BPTTBatchSampler:
+class BatchSampler:
 
     def __init__(
-        self, dataset, batch_size, seq_len, eos_token, padding_token,
-        sampler='random', last_batch='keep', num_prefetch=1
+        self, dataset, batch_size, batch_axis=1,
+        sampler='random', last_batch='keep', _batchify_fn=None
     ):
         self._dataset = dataset
         self._batch_size = batch_size
-        self._seq_len = seq_len
-        self._eos_token = eos_token
-        self._padding_token = padding_token
+        self._batch_axis = batch_axis
         self._sampler = self._get_sampler(sampler)(len(self._dataset))
         self._last_batch = last_batch
-        self._num_prefetch = num_prefetch
+        self._batchify_fn = _batchify_fn
+        self._prev = []
 
     def _get_sampler(self, sampler):
         assert isinstance(
@@ -35,9 +30,49 @@ class BPTTBatchSampler:
         )
 
     def __iter__(self):
-        seed = random.getrandbits(32)
-        np_seed = np.random.randint(0, 2**32)
-        mx_seed = int(mx.nd.random.uniform(0, 2**32).asscalar())
+        corpus = (self._dataset[idx] for idx in self._sampler)
+        batch, self._prev = self._prev, []
+        for i in corpus:
+            batch.append(i)
+            if len(batch) == self._batch_size:
+                if callable(self._batchify_fn):
+                    yield self._batchify_fn(batch)
+                else:
+                    yield batch
+                batch = []
+        if batch:
+            if self._last_batch == 'keep':
+                if callable(self._batchify_fn):
+                    yield self._batchify_fn(batch)
+                else:
+                    yield batch
+            elif self._last_batch == 'discard':
+                return
+            elif self._last_batch == 'rollover':
+                self._prev = batch
+            else:
+                raise ValueError(
+                    "last_batch must be one of 'keep', "
+                    "'discard', or 'rollover', but got %s" % self._last_batch
+                )
+
+
+class BPTTBatchSampler(BatchSampler):
+
+    def __init__(
+        self, dataset, batch_size, seq_len,
+        bos_token, eos_token, padding_token,
+        sampler='random', last_batch='keep'
+    ):
+        super().__init__(
+            dataset, batch_size, sampler=sampler, last_batch=last_batch
+        )
+        self._seq_len = seq_len
+        self._bos_token = bos_token
+        self._eos_token = eos_token
+        self._padding_token = padding_token
+
+    def __iter__(self):
         corpus = (self._dataset[idx] for idx in self._sampler)
 
         def _init():
@@ -62,7 +97,9 @@ class BPTTBatchSampler:
         def _read(buffers, i, corpus):
             """Read a sentence from the corpus into i-th buffer."""
             if len(buffers[i]) <= 2:
-                buffers[i].extend(next(corpus) + [self._eos_token])
+                buffers[i].extend(
+                    [self._bos_token] + next(corpus) + [self._eos_token]
+                )
 
         def _write(
             data, mask, target, reverse_target, buffers, seq_len, i, length
@@ -104,7 +141,18 @@ class BPTTBatchSampler:
             boolean_idx = mask.sum(axis=1) != 0
             num_batch = sum(boolean_idx)
             if num_batch == self._batch_size or self._last_batch == 'keep':
-                yield (
-                    mx.nd.array(data).T, mx.nd.array(mask).T,
-                    mx.nd.array(target).T, mx.nd.array(reverse_target).T
-                )
+                yield data.T, mask.T, target.T, reverse_target.T
+
+
+class BPTTDataLoader:
+
+    def __init__(
+        self, dataset, batch_size, seq_len,
+        bos_token, eos_token, padding_token,
+        sampler='random', last_batch='keep'
+    ):
+        self._batch_size = batch_size
+        self._data_iter = BPTTBatchSampler(
+            dataset, batch_size, seq_len, bos_token, eos_token, padding_token,
+            sampler=sampler, last_batch=last_batch
+        )

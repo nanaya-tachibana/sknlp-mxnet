@@ -8,9 +8,4 @@ setup(
     install_requires=[
         'Click',
     ],
-    # entry_points='''
-    #     [console_scripts]
-    #     gi-server=server.main:main
-    #     model-cli=model.addrrec:main
-    # ''',
 )

@@ -78,27 +78,23 @@ class AdaptiveSoftmax(nn.HybridBlock):
                 weight_initializer=mx.init.Normal(1 / math.sqrt(input_size)),
                 prefix='head_'
             )
+            self.tail_layers: List[mx.gluon.HybridBlock] = []
             for i in range(self._num_clusters):
-                self.tail_layers = nn.HybridSequential(prefix='tail_layers')
-                with self.tail_layers.name_scope():
-                    tail_layer = nn.HybridSequential(prefix=f'tail{i}_')
-                    with tail_layer.name_scope():
-                        tail_layer.add(nn.Dense(
-                            projection_sizes[i], flatten=False, use_bias=False,
-                            weight_initializer=mx.init.Normal(
-                                1 / math.sqrt(input_size)
-                            ),
-                            prefix='proj_'
-                        ))
-                        tail_layer.add(nn.Dense(
-                            self._cutoffs[i + 1] - self._cutoffs[i],
-                            flatten=False, use_bias=False,
-                            weight_initializer=mx.init.Normal(
-                                1 / math.sqrt(projection_sizes[i])
-                            ),
-                            prefix='w_'
-                        ))
-                    self.tail_layers.add(tail_layer)
+                tail_layer = nn.HybridSequential(prefix=f'tail{i}_')
+                with tail_layer.name_scope():
+                    tail_layer.add(nn.Dense(
+                        projection_sizes[i], flatten=False, use_bias=False,
+                        prefix='proj_'
+                    ))
+                    tail_layer.add(nn.Dense(
+                        self._cutoffs[i + 1] - self._cutoffs[i],
+                        flatten=False, use_bias=False,
+                        prefix='w_'
+                    ))
+                self.tail_layers.append(tail_layer)
+                # Note that Blocks inside the list, tuple or dict will
+                # not be registered automatically
+                self.register_child(tail_layer)
             self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
     def hybrid_forward(
@@ -155,32 +151,45 @@ class ElmoLoss(nn.HybridBlock):
     ) -> HybridType:
         # can't work with ndarray now
         # last_layer = F.SequenceLast(inputs)
-        length = mask.sum(axis=0)
-        sequence_mask = F.reshape(
-            F.SequenceMask(
-                mask, sequence_length=length - 1, use_sequence_length=True
-            ),
-            shape=(-1, )
-        )
+        # length = mask.sum(axis=0)
+        # sequence_mask = F.reshape(
+        #     F.SequenceMask(
+        #         mask, sequence_length=length - 1, use_sequence_length=True
+        #     ),
+        #     shape=(-1, )
+        # )
         last_layer = F.squeeze(
             F.slice_axis(inputs, begin=-1, end=None, axis=0), axis=0
         )
         forward_inputs, backward_inputs = F.split(
             last_layer, axis=-1, num_outputs=2
         )
-        forward_loss = self.loss_func(
+        forward_backward_inputs = F.concat(
             F.reshape(forward_inputs, shape=(-3, -1)),
-            F.reshape(forward_labels, shape=(-1, ))
-        ) * sequence_mask
+            F.reshape(backward_inputs, shape=(-3, -1)),
+            dim=0
+        )
+        forward_backward_labels = F.concat(
+            F.reshape(forward_labels, shape=(-1, )),
+            F.reshape(backward_labels, shape=(-1, )),
+            dim=0
+        )
+        # forward_loss = self.loss_func(
+        #     F.reshape(forward_inputs, shape=(-3, -1)),
+        #     F.reshape(forward_labels, shape=(-1, ))
+        # ) * sequence_mask
 
-        reversed_backward_inputs = F.SequenceMask(
-            backward_inputs, sequence_length=length, use_sequence_length=True
-        )
-        reversed_backward_labels = F.SequenceMask(
-            backward_labels, sequence_length=length, use_sequence_length=True
-        )
-        backward_loss = self.loss_func(
-            F.reshape(reversed_backward_inputs, shape=(-3, -1)),
-            F.reshape(reversed_backward_labels, shape=(-1, ))
-        ) * sequence_mask
-        return 0.5 * (forward_loss + backward_loss)
+        # reversed_backward_inputs = F.SequenceReverse(
+        #     backward_inputs, sequence_length=length, use_sequence_length=True
+        # )
+        # reversed_backward_labels = F.SequenceReverse(
+        #     backward_labels, sequence_length=length, use_sequence_length=True
+        # )
+        # backward_loss = self.loss_func(
+        #     F.reshape(reversed_backward_inputs, shape=(-3, -1)),
+        #     F.reshape(reversed_backward_labels, shape=(-1, ))
+        # ) * sequence_mask
+        mask = F.reshape(F.tile(mask, reps=(2, 1)), shape=(-1, ))
+        return 0.5 * self.loss_func(
+            forward_backward_inputs, forward_backward_labels
+        ) * mask

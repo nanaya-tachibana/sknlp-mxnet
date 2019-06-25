@@ -9,9 +9,7 @@ import gluonnlp
 logger = logging.getLogger(__name__)
 
 
-def _pad_arrs_to_max_length(
-    arrs, pad_axis, pad_val, use_shared_mem, dtype, min_length=0
-):
+def _pad_arrs_to_max_length(arrs, pad_axis, pad_val, dtype, min_length=0):
     """Inner Implementation of the Pad batchify
 
     Parameters
@@ -65,13 +63,13 @@ def _pad_arrs_to_max_length(
                 ret[tuple(row_slices)] = np.arange(
                     last_value + 1,
                     last_value + max_size - original_length[i] + 1,
-                    dtype=dtype)
-
-    ctx = mx.Context('cpu_shared', 0) if use_shared_mem else mx.cpu()
-    ret = mx.nd.array(ret, ctx=ctx, dtype=dtype)
-    original_length = mx.nd.array(original_length, ctx=ctx, dtype=np.int32)
-
-    return ret, original_length
+                    dtype=dtype
+                )
+    # return numpy array
+    # ctx = mx.Context('cpu_shared', 0) if use_shared_mem else mx.cpu()
+    # ret = mx.nd.array(ret, ctx=ctx, dtype=dtype)
+    # original_length = mx.nd.array(original_length, ctx=ctx, dtype=np.int32)
+    return ret, np.asarray(original_length)
 
 
 class Pad(gluonnlp.data.batchify.Pad):
@@ -134,14 +132,9 @@ class Pad(gluonnlp.data.batchify.Pad):
     def __init__(
         self, axis=0, pad_val=0, min_length=0, ret_length=False, dtype=None
     ):
-        self._axis = axis
-        assert isinstance(axis, int), f'axis must be an integer! ' \
-                                      f'Received axis={axis}, ' \
-                                      f'type={type(axis)}.'
-        self._pad_val = pad_val
-        self._ret_length = ret_length
-        self._dtype = dtype
-        self._warned = False
+        super().__init__(
+            axis=axis, pad_val=pad_val, ret_length=ret_length, dtype=dtype
+        )
         self._min_length = min_length
 
     def __call__(self, data):
@@ -176,18 +169,87 @@ class Pad(gluonnlp.data.batchify.Pad):
                 'Using Pad with NDArrays is discouraged for speed reasons. '
                 'Instead you should pad your data while it is still a list '
                 'and before converting to an NDArray. '
-                'Alternatively you can consider inputting a numpy.ndarray.')
+                'Alternatively you can consider inputting a numpy.ndarray.'
+            )
         if isinstance(data[0], (mx.nd.NDArray, np.ndarray, list)):
             padded_arr, original_length = _pad_arrs_to_max_length(
-                data, self._axis,
-                self._pad_val, True,
-                self._dtype, self._min_length)
+                data, self._axis, self._pad_val, self._dtype, self._min_length
+            )
             if self._ret_length:
                 return padded_arr, original_length
             else:
                 return padded_arr
         else:
             raise NotImplementedError
+
+
+def _stack_arrs(arrs, dtype):
+    if isinstance(arrs[0], mx.nd.NDArray):
+        dtype = arrs[0].dtype if dtype is None else dtype
+        return mx.nd.stack(*arrs)
+    else:
+        return np.asarray(arrs, dtype=dtype)
+
+
+class Stack(gluonnlp.data.batchify.Stack):
+    """Stack the input data samples to construct the batch.
+
+    The N input samples must have the same shape/length and will be stacked to construct a batch.
+
+    Parameters
+    ----------
+    dtype : str or numpy.dtype, default None
+        The value type of the output. If it is set to None, the input data type is used.
+
+    Examples
+    --------
+    >>> from gluonnlp.data import batchify
+    >>> # Stack multiple lists
+    >>> a = [1, 2, 3, 4]
+    >>> b = [4, 5, 6, 8]
+    >>> c = [8, 9, 1, 2]
+    >>> gluonnlp.data.batchify.Stack()([a, b, c])
+    <BLANKLINE>
+    [[1 2 3 4]
+     [4 5 6 8]
+     [8 9 1 2]]
+    <NDArray 3x4 @cpu_shared(0)>
+    >>> # Stack multiple numpy.ndarrays
+    >>> a = np.array([[1, 2, 3, 4], [5, 6, 7, 8]])
+    >>> b = np.array([[5, 6, 7, 8], [1, 2, 3, 4]])
+    >>> gluonnlp.data.batchify.Stack()([a, b])
+    <BLANKLINE>
+    [[[1 2 3 4]
+      [5 6 7 8]]
+    <BLANKLINE>
+     [[5 6 7 8]
+      [1 2 3 4]]]
+    <NDArray 2x2x4 @cpu_shared(0)>
+    >>> # Stack multiple NDArrays
+    >>> a = mx.nd.array([[1, 2, 3, 4], [5, 6, 7, 8]])
+    >>> b = mx.nd.array([[5, 6, 7, 8], [1, 2, 3, 4]])
+    >>> gluonnlp.data.batchify.Stack()([a, b])
+    <BLANKLINE>
+    [[[1. 2. 3. 4.]
+      [5. 6. 7. 8.]]
+    <BLANKLINE>
+     [[5. 6. 7. 8.]
+      [1. 2. 3. 4.]]]
+    <NDArray 2x2x4 @cpu_shared(0)>
+    """
+    def __call__(self, data):
+        """Batchify the input data
+
+        Parameters
+        ----------
+        data : list
+            The input data samples
+
+        Returns
+        -------
+        batch_data : NDArray
+        """
+        return _stack_arrs(data, self._dtype)
 
 
 class BPTTBatchify:

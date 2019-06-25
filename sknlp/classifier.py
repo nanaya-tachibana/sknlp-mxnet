@@ -17,7 +17,9 @@ from sklearn.metrics import precision_recall_fscore_support
 from mxnet.gluon.data.dataloader import default_mp_batchify_fn
 
 from .base import DeepSupervisedModel
-from .data import ClassifyDataset, InMemoryDataset, Pad
+from .data import ClassifyDataset, InMemoryDataset
+from .data.batchify import Pad, Stack
+from .utils.array import sequence_mask
 from .embedding import Token2vec
 from .encode import TextCNN, TextRCNN, TextRNN, TextTransformer
 from .segmenter import Segmenter
@@ -37,15 +39,10 @@ def _decode(logits, threshold, is_binary=False, is_multilabel=False):
 
 def batchify(padding, one_batch):
     (inputs, length), labels = gluonnlp.data.batchify.Tuple(
-        Pad(axis=0, pad_val=padding, ret_length=True),
-        gluonnlp.data.batchify.Stack()
+        Pad(axis=0, pad_val=padding, ret_length=True), Stack()
     )(one_batch)
-    inputs = inputs.transpose(axes=(1, 0))
-    mask = mx.nd.SequenceMask(
-        mx.nd.ones_like(inputs),
-        sequence_length=length.astype('float32'),
-        use_sequence_length=True
-    )
+    inputs = inputs.transpose((1, 0))
+    mask = sequence_mask(np.ones_like(inputs), length.astype('int'))
     return inputs, mask, labels.astype('float32')
 
 
@@ -82,7 +79,9 @@ class DeepClassifier(DeepSupervisedModel):
 
     def _build(self, ctx, initialize=True):
         if self.embedding_layer is None:
-            self.embedding_layer = Token2vec(self._vocab, self._embed_size)
+            self.embedding_layer = Token2vec(
+                self._vocab, self._embed_size, loss=None
+            )
         self._trainable = {
             'embedding': self.embedding_layer,
             'encode': self.encode_layer
@@ -142,9 +141,11 @@ class DeepClassifier(DeepSupervisedModel):
             p, r, f, _ = avg_score
             logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
                         f'{round(r * 100, 2)})')
+            return f
         else:
             p, r, f, _ = scores
             logger.info(f'precision: {p}, recall: {r}, f1: {f}')
+            return f
 
     def _calculate_logits(self, inputs, mask, *args):
         return self.encode_layer(self.embedding_layer(inputs), mask)
@@ -236,11 +237,15 @@ class DeepClassifier(DeepSupervisedModel):
             os.path.join(temp_dir, 'encode-symbol.json'), inputs,
             os.path.join(temp_dir, 'encode-0000.params'), ctx=ctx
         )
-        meta['ctx'] = ctx
-        meta['vocab'] = embedding_layer._vocab
-        meta['encode_layer'] = encode_layer
-        meta['embedding_layer'] = embedding_layer
-        ins = cls(**meta)
+        ins = cls(
+            meta['num_classes'], encode_layer,
+            embedding_layer=embedding_layer,
+            vocab=embedding_layer._vocab,
+            is_multilabel=meta['is_multilabel'],
+            label2idx=meta['label2idx'], segmenter=meta['segmenter'],
+            max_length=meta['max_length'], embed_size=meta['embed_size'],
+            threshold=meta['threshold'], ctx=ctx
+        )
         ins._trained = True
         ins._build(ctx, initialize=False)
         return ins
