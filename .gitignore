@@ -12,3 +12,4 @@ train_data/
 valid_data/
 pyhanlp/
 pretrain/
+*.egg-info
