@@ -152,8 +152,10 @@ class Token2vec(BaseModel):
     def fit(
         self, train_dataset=None, valid_dataset=None, batch_size=32,
         sequence_length=20, last_batch='keep', n_epochs=15, optimizer='adam',
-        lr: float = 1e-3, clip=1.0, checkpoint=None, save_frequency=1,
-        num_workers=1
+        lr: float = 1e-3, lr_update_factor: float = 0.9,
+        lr_update_steps: int = 1000,
+        clip=1.0, checkpoint=None, save_frequency=1,
+        prefecth=0
     ):
         """
         Fit model.
@@ -181,9 +183,9 @@ class Token2vec(BaseModel):
         save_frequency: int
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
+        self._prefetch = prefecth
         if not self._trained:
             self._build(self._ctx)
-        self._num_workers = num_workers
 
         dataloader = self._build_dataloader(
             train_dataset, batch_size, sequence_length, shuffle=True,
@@ -191,7 +193,8 @@ class Token2vec(BaseModel):
         )
         self._fit(
             dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
-            optimizer=optimizer, clip=clip, checkpoint=checkpoint,
+            optimizer=optimizer, lr_update_factor=lr_update_factor,
+            lr_update_steps=lr_update_steps, clip=clip, checkpoint=checkpoint,
             save_frequency=save_frequency
         )
 
@@ -358,7 +361,10 @@ class Token2vecElmo(Token2vec):
             sampler='random' if shuffle else 'sequential',
             last_batch=last_batch
         )
-        return PrefetchDataLoader(batch_sampler, batch_size)
+        if self._prefetch > 0:
+            return PrefetchDataLoader(batch_sampler, batch_size)
+        else:
+            return batch_sampler
 
     def score(self, dataset, sequence_length=20, batch_size=64):
         assert self._trained
@@ -371,5 +377,5 @@ class Token2vecElmo(Token2vec):
         self._before_epoch(dataloader=dataloader)
         for one_batch in dataloader:
             total_loss += self._forward_backward(one_batch, ctx)
-            total_word += one_batch[1].sum().asscalar()
+            total_word += one_batch[1].sum()
         return total_loss / total_word

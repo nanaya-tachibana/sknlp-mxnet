@@ -13,7 +13,7 @@ class BaseModel:
 
     def __init__(self, ctx=None):
         self._ctx = [mx.cpu()] if ctx is None else ctx
-        self._num_workers = 0
+        self._prefetch = 0
         self._trained = False
         self._trainable = dict()
 
@@ -23,11 +23,11 @@ class BaseModel:
         lr: float = 0.001,
         n_epochs: int = 100,
         optimizer: str = 'adam',
+        lr_update_factor: float = 0.9,
+        lr_update_steps: int = 1000,
         clip: float = 5,
         checkpoint: str = None,
         save_frequency: int = 1,
-        momentum: float = 0,
-        default_update_factor: float = 0.9
     ):
         """
         Help function for model fitting.
@@ -63,22 +63,14 @@ class BaseModel:
         """
         assert len(self._trainable) > 0, 'No trainable parameters'
 
+        lr_scheduler = mx.lr_scheduler.FactorScheduler(
+            step=lr_update_steps, factor=lr_update_factor
+        )
+        optimizer_params = {'learning_rate': lr, 'lr_scheduler': lr_scheduler}
         params_dict = self._collect_params()
-        optimizer_params = {'learning_rate': lr}
-        if optimizer == 'sgd':
-            optimizer_params['momentum'] = momentum
         trainer = mx.gluon.Trainer(params_dict, optimizer, optimizer_params)
-        best_score = 0.0
-        best_epoch = 0
         for epoch in range(1, n_epochs + 1):
-            lr_decay = 1.0
-            if best_epoch != 0:
-                if epoch - best_epoch >= 5:
-                    lr_decay = 0.5
-                    best_epoch = epoch
-            self._before_epoch(
-                trainer=trainer, dataloader=train_dataloader, lr_decay=lr_decay
-            )
+            self._before_epoch(trainer=trainer, dataloader=train_dataloader)
             avg_loss = self._one_epoch(trainer, train_dataloader, epoch, clip)
             self._train_log(avg_loss)
             self._trained = True
@@ -87,10 +79,6 @@ class BaseModel:
 
             if valid_dataset is not None:
                 score = self._valid_log(valid_dataset)
-                if score >= best_score:
-                    best_score = score
-                    best_epoch = epoch
-                    lr_decay = 1.0
 
     def _collect_params(self):
         params_dict = mx.gluon.ParameterDict()
@@ -135,12 +123,7 @@ class BaseModel:
         return sum(loss.sum().asscalar() for loss in losses)
 
     def _before_epoch(self, *arg, **kwargs):
-        trainer = kwargs['trainer']
-        lr_decay = kwargs['lr_decay']
-        if lr_decay < 1:
-            new_lr = trainer.learning_rate * lr_decay
-            trainer.set_learning_rate(new_lr)
-            logger.info(f'change lr to {new_lr}')
+        pass
 
     def _one_epoch(self, trainer, data_iter, epoch, clip=1.0):
         total_loss = 0
@@ -156,7 +139,7 @@ class BaseModel:
             batch_loss = self._batch_loss(loss, *one_batch)
             total_loss += batch_loss
             num_batch += 1
-            if num_batch % 10 == 0:
+            if num_batch % 100 == 0:
                 speed = round(num_batch / (time.time() - start_time), 2)
                 logger.info(
                     f'epoch {epoch}, batch {num_batch}, '
@@ -199,12 +182,15 @@ class BaseModel:
     def _build_dataloader(
         self, dataset, batch_size, shuffle=True, last_batch='keep'
     ):
-        return BatchSampler(
+        batch_sampler = BatchSampler(
             dataset, batch_size,
             sampler='random' if shuffle else 'sequential',
             last_batch=last_batch, _batchify_fn=self._batchify_fn()
         )
-        # return PrefetchDataLoader(batch_sampler, batch_size)
+        if self._prefetch > 0:
+            return PrefetchDataLoader(batch_sampler, batch_size)
+        else:
+            return batch_sampler
 
     def save(self, file_path: str) -> None:
         raise NotImplementedError('save model function is not implemented.')
@@ -238,8 +224,10 @@ class DeepSupervisedModel(BaseModel):
     def fit(
         self, X=None, y=None, train_dataset=None,
         valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
-        last_batch='keep', n_epochs=15, optimizer='adam', lr=3e-4,
-        clip=5.0, checkpoint=None, save_frequency=1, num_workers=1
+        last_batch='keep', n_epochs=15, optimizer='adam', lr=1e-3,
+        lr_update_factor: float = 0.9,
+        lr_update_steps: int = 1000,
+        clip=5.0, checkpoint=None, save_frequency=1, prefetch=0
     ):
         """
         Fit model.
@@ -267,7 +255,7 @@ class DeepSupervisedModel(BaseModel):
         save_frequency: int
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
-        self._num_workers = num_workers
+        self._prefetch = prefetch
         train_dataset = self._get_or_build_dataset(train_dataset, X, y)
 
         self.idx2labels = train_dataset.idx2labels
@@ -289,6 +277,7 @@ class DeepSupervisedModel(BaseModel):
         )
         self._fit(
             dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
-            optimizer=optimizer, clip=clip, checkpoint=checkpoint,
+            optimizer=optimizer, lr_update_factor=lr_update_factor,
+            lr_update_steps=lr_update_steps, clip=clip, checkpoint=checkpoint,
             save_frequency=save_frequency
         )
