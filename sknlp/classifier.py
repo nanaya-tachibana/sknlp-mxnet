@@ -274,7 +274,7 @@ class DeepClassifier(DeepSupervisedModel):
                 )
             elif meta['model_type'] == 'builtin-text_rcnn_classifier':
                 return TextRCNNClassifier._load(
-                    temp_dir, meta, update=update
+                    temp_dir, meta, update=update, ctx=ctx
                 )
             else:
                 raise ValueError('unknown model type.')
