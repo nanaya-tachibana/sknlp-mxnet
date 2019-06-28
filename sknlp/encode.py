@@ -36,17 +36,19 @@ class TextCNN(nn.HybridBlock):
     def __init__(
         self, embed_size=100,
         num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
-        conv_layer_activation='tanh', num_highway=1, output_size=1,
+        conv_layer_activation='tanh', num_highway=1, dropout=0, output_size=1,
         num_fc_layers=2, fc_hidden_size=512, fc_activation='relu', **kwargs
     ):
         super().__init__(**kwargs)
         with self.name_scope():
+            self.input_dropout = nn.Dropout(dropout)
             self.cnn_layer = ConvolutionalEncoder(
                 embed_size=embed_size, num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
                 output_size=None, num_highway=num_highway, prefix='cnn_'
             )
+            self.cnn_dropout = nn.Dropout(dropout)
             self.fc_layer = FCLayer(
                 num_layers=num_fc_layers, hidden_size=fc_hidden_size,
                 activation=fc_activation, output_size=output_size
@@ -57,7 +59,10 @@ class TextCNN(nn.HybridBlock):
         inputs: shape(seq_length, batch_size)
         mask: shape(seq_length, batch_size)
         """
-        return self.fc_layer(self.cnn_layer(inputs, mask))
+        cnn_output = self.cnn_dropout(
+            self.cnn_layer(self.input_dropout(inputs), mask)
+        )
+        return self.fc_layer(cnn_output)
 
 
 class TextRNN(nn.HybridBlock):

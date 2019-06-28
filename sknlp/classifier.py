@@ -301,8 +301,9 @@ class TextCNNClassifier(DeepClassifier):
         vocab=None, is_multilabel=False, label2idx=None, segmenter='jieba',
         max_length=100, embed_size=100, threshold=None,
         num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
-        conv_layer_activation='tanh', num_highway=1, num_fc_layers=2,
-        fc_hidden_size=512, fc_activation='tanh', ctx=mx.cpu(), **kwargs
+        conv_layer_activation='tanh', num_highway=1, dropout=0,
+        num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
+        ctx=mx.cpu(), **kwargs
     ):
         if encode_layer is None:
             encode_layer = TextCNN(
@@ -311,6 +312,7 @@ class TextCNNClassifier(DeepClassifier):
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
                 num_highway=num_highway,
+                dropout=dropout,
                 num_fc_layers=num_fc_layers,
                 fc_hidden_size=fc_hidden_size,
                 output_size=num_classes,
