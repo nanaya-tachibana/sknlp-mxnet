@@ -15,11 +15,11 @@ class TestDeepClassifier:
             ([100, 200, 300, 400, 500], 1)
         ]
         batch_inputs, batch_mask, batch_labels = batchify(data)
-        assert batch_inputs.asnumpy().transpose().tolist() == [
+        assert batch_inputs.transpose().tolist() == [
             [8, 9, 10, 1, 1],
             [100, 200, 300, 400, 500]
         ]
-        assert batch_mask.asnumpy().transpose().tolist() == [
+        assert batch_mask.transpose().tolist() == [
             [1, 1, 1, 0, 0], [1, 1, 1, 1, 1]
         ]
-        assert batch_labels.asnumpy().transpose().tolist() == [0, 1]
+        assert batch_labels.transpose().tolist() == [0, 1]

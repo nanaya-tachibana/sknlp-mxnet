@@ -142,17 +142,3 @@ class BPTTBatchSampler(BatchSampler):
             num_batch = sum(boolean_idx)
             if num_batch == self._batch_size or self._last_batch == 'keep':
                 yield data.T, mask.T, target.T, reverse_target.T
-
-
-class BPTTDataLoader:
-
-    def __init__(
-        self, dataset, batch_size, seq_len,
-        bos_token, eos_token, padding_token,
-        sampler='random', last_batch='keep'
-    ):
-        self._batch_size = batch_size
-        self._data_iter = BPTTBatchSampler(
-            dataset, batch_size, seq_len, bos_token, eos_token, padding_token,
-            sampler=sampler, last_batch=last_batch
-        )

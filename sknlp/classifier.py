@@ -14,7 +14,6 @@ import gluonnlp
 import numpy as np
 from scipy.special import expit
 from sklearn.metrics import precision_recall_fscore_support
-from mxnet.gluon.data.dataloader import default_mp_batchify_fn
 
 from .base import DeepSupervisedModel
 from .data import ClassifyDataset, InMemoryDataset

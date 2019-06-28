@@ -3,8 +3,8 @@ import os
 from sknlp.vocab import Vocab
 from sknlp.data import SimpleIndexedRecordIO
 from sknlp.data import (
-    ClassifyDataset, InMemoryDataset, NLPDataset,
-    RecordFileDataset, SequenceTagDataset
+    SequenceTagDataset, ClassifyDataset, InMemoryDataset, NLPDataset,
+    SupervisedNLPDataset, RecordFileDataset
 )
 
 
@@ -55,13 +55,46 @@ class TestNLPDataset(TestDataset):
         ['i1', 'i2', 'i3']
     )
 
+    dataset_cls = NLPDataset
+
     def test_dataset(self, tmp_path):
-        nlp_dataset = NLPDataset(self.dataset)
+        nlp_dataset = self.dataset_cls(self.dataset)
         assert len(nlp_dataset) == 3
-        assert nlp_dataset[0] == ([5, 7, 4], [0, 1], ['o1', 'i1'])
+        assert nlp_dataset[0] == [5, 7, 4]
 
     def test_custom_settings(self):
-        nlp_dataset = NLPDataset(
+        nlp_dataset = self.dataset_cls(
+            self.dataset,
+            vocab=Vocab({
+                '大': 102, '叫': 101, '好': 100,
+                '家': 1, '厉': 1, '害': 1
+            })
+        )
+        assert nlp_dataset[0] == [4, 5, 6]
+
+    def test_max_length(self):
+        nlp_dataset = self.dataset_cls(self.dataset, max_length=2)
+        assert nlp_dataset[0] == [5, 7]
+
+
+class TestSupervisedNLPDataset(TestDataset):
+
+    dataset = InMemoryDataset(
+        ['大叫好', '大家好', '好厉害'],
+        ['1|2', '1|2|3', '3|1'],
+        ['o1', 'o2', 'o3'],
+        ['i1', 'i2', 'i3']
+    )
+
+    dataset_cls = SupervisedNLPDataset
+
+    def test_dataset(self, tmp_path):
+        dataset = self.dataset_cls(self.dataset)
+        assert len(dataset) == 3
+        assert dataset[0] == ([5, 7, 4], [0, 1])
+
+    def test_custom_settings(self):
+        dataset = self.dataset_cls(
             self.dataset,
             vocab=Vocab({
                 '大': 102, '叫': 101, '好': 100,
@@ -69,18 +102,18 @@ class TestNLPDataset(TestDataset):
             }),
             label2idx={'1': 2, '2': 0, '3': 1}
         )
-        assert nlp_dataset[0] == ([4, 5, 6], [2, 0], ['o1', 'i1'])
+        assert dataset[0] == ([4, 5, 6], [2, 0])
 
     def test_max_length(self):
-        nlp_dataset = NLPDataset(self.dataset, max_length=2)
-        assert nlp_dataset[0] == ([5, 7], [0, 1], ['o1', 'i1'])
+        dataset = self.dataset_cls(self.dataset, max_length=2)
+        assert dataset[0] == ([5, 7], [0, 1])
 
 
-class TestClassifyDataset(TestNLPDataset):
+class TestClassifyDataset(TestSupervisedNLPDataset):
 
     def test_dataset(self, tmp_path):
         c_dataset = ClassifyDataset(self.dataset)
-        assert c_dataset[0] == ([5, 7, 4], [1, 1, 0], ['o1', 'i1'])
+        assert c_dataset[0] == ([5, 7, 4], [1, 1, 0])
         assert c_dataset.idx2labels([0, 8]) == ['1']
 
 
@@ -95,5 +128,5 @@ class TestSequenceTagDataset(TestDataset):
 
     def test_dataset(self, tmp_path):
         s_dataset = SequenceTagDataset(self.dataset)
-        assert s_dataset[0] == ([5, 7, 4], [0, 1, 2], ['o1', 'i1'])
+        assert s_dataset[0] == ([5, 7, 4], [0, 1, 2])
         assert s_dataset.idx2labels([0, 10]) == ['1', 'O']

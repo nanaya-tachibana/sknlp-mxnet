@@ -93,7 +93,7 @@ class NLPDataset:
         self._lengths = []
         for i in range(n_samples):
             row = dataset[i]
-            text = row
+            text = self._split_row(row)[0]
             if vocab is None:
                 words = self._segmenter(text)
                 self._lengths.append(len(words))
@@ -103,26 +103,18 @@ class NLPDataset:
         else:
             self._vocab = vocab
 
+    def _split_row(self, row: str) -> List[str]:
+        return row.split('\t')
+
     def _preprocess_text(self, text: str) -> List[int]:
         return self._vocab[self._segmenter(text[:self._max_length])]
 
-    def _preprocess_func(self, text: str) -> List[int]:
-        return self._preprocess_text(text)
-
-    def idx2tokens(self, idx_list: List[int]) -> List[str]:
-        return self._vocab.to_tokens(idx_list)
-
-    @property
-    def sample_lengths(self):
-        if not self._lengths:
-            for i in range(len(self._dataset)):
-                text = self._dataset[i]
-                words = self._segmenter(text)
-                self._lengths.append(len(words))
-        return self._lengths
+    def _preprocess_func(self, text: str, *args) -> List[int]:
+        processed_text = self._preprocess_text(text)
+        return processed_text
 
     def __getitem__(self, idx: int) -> List[int]:
-        return self._preprocess_func(self._dataset[idx])
+        return self._preprocess_func(*self._split_row(self._dataset[idx]))
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -166,7 +158,7 @@ class SupervisedNLPDataset(NLPDataset):
         label_counter = collections.Counter()
         for i in range(n_samples):
             row = dataset[i]
-            text, label = self._split_row(row, ignore_others=True)
+            text, label = self._split_row(row)[:2]
             if vocab is None:
                 token_counter.update(self._segmenter(text))
             if label2idx is None:
@@ -185,38 +177,17 @@ class SupervisedNLPDataset(NLPDataset):
             self._label2idx = label2idx
         self._idx2label = {v: k for k, v in self._label2idx.items()}
 
-    @property
-    def idx2label(self):
-        return self._idx2label
-
-    def _split_row(
-        self, row: str, ignore_others: bool = False
-    ) -> Union[Tuple[str, str], Tuple[str, str, List[str]]]:
-        cells = row.split('\t')
-        if len(cells) == 1:
-            return cells[0], ''
-        elif ignore_others or len(cells) == 2:
-            return cells[0], cells[1]
-        else:
-            return cells[0], cells[1], cells[2:]
-
-    def _preprocess_text(self, text: str) -> List[int]:
-        return self._vocab[self._segmenter(text[:self._max_length])]
-
     def _preprocess_label(self, label: str) -> List[int]:
         return [self._label2idx[l] for l in label.split('|')]
 
     def _preprocess_func(
         self, text: str, label: str, *args
-    ) -> Tuple[List[int], List[int], List[str]]:
+    ) -> Tuple[List[int], List[int]]:
         processed_text = self._preprocess_text(text)
         processed_label = self._preprocess_label(label)
-        if len(args) > 0:
-            return processed_text, processed_label, args[0]
-        else:
-            return processed_text, processed_label
+        return processed_text, processed_label
 
-    def __getitem__(self, idx: int) -> Tuple[List[int], List[int], List[str]]:
+    def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
         return self._preprocess_func(*self._split_row(self._dataset[idx]))
 
 

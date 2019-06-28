@@ -1,7 +1,4 @@
 import os
-
-import pytest
-
 from sknlp.data import SimpleIndexedRecordIO
 
 
