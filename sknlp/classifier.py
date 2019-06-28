@@ -283,15 +283,11 @@ class DeepClassifier(DeepSupervisedModel):
 def cnn_batchify(padding, min_length, one_batch):
     (inputs, length), labels = gluonnlp.data.batchify.Tuple(
         Pad(axis=0, pad_val=padding, ret_length=True, min_length=min_length),
-        gluonnlp.data.batchify.Stack()
+        Stack()
     )(one_batch)
-    inputs = inputs.transpose(axes=(1, 0))
-    mask = mx.nd.SequenceMask(
-        mx.nd.ones_like(inputs),
-        sequence_length=length.astype('float32'),
-        use_sequence_length=True
-    )
-    return default_mp_batchify_fn((inputs, mask, labels.astype('float32')))
+    inputs = inputs.transpose((1, 0))
+    mask = sequence_mask(np.ones_like(inputs), length.astype('int'))
+    return inputs, mask, labels.astype('float32')
 
 
 class TextCNNClassifier(DeepClassifier):
@@ -339,7 +335,7 @@ class TextCNNClassifier(DeepClassifier):
     def _batchify_fn(self):
         vocab = self._vocab
         return functools.partial(
-            batchify, vocab[vocab.padding_token],
+            cnn_batchify, vocab[vocab.padding_token],
             min(self.meta['ngram_filter_sizes'])
         )
 
