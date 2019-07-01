@@ -1,8 +1,18 @@
-from mxnet.gluon import nn
+from mxnet.gluon import nn, contrib
 
 from gluonnlp.model import ConvolutionalEncoder
 
 from .module import BiLSTMWithClip, BaseTransformerEncoder
+
+
+class _HybridConcurrent(contrib.nn.HybridConcurrent):
+
+    def hybrid_forward(self, F, x, m):
+        out = []
+        for block in self._children.values():
+            out.append(block(x, m))
+        out = F.stack(*out, axis=self.axis)
+        return out
 
 
 class FCLayer(nn.HybridBlock):
@@ -20,15 +30,63 @@ class FCLayer(nn.HybridBlock):
                         output_size, flatten=False, prefix=f'layer{i}_'
                     ))
                 else:
-                    activation = activation if i == num_layers - 2 else 'relu'
                     self.net.add(nn.Dense(
                         hidden_size, flatten=False, prefix=f'layer{i}_'
                     ))
                     self.net.add(nn.BatchNorm(axis=-1))
-                    self.net.add(nn.Activation(activation))
+                    if i != num_layers - 2:
+                        self.net.add(nn.Activation('relu'))
+                    else:
+                        self.net.add(nn.Activation(activation))
 
     def hybrid_forward(self, F, inputs):
         return self.net(inputs)
+
+
+class AttentionCell(nn.HybridBlock):
+
+    def __init__(self, activation='tanh', **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.dense = nn.Dense(1, activation=activation, flatten=False)
+
+    def hybrid_forward(self, F, inputs, mask):
+        """
+        inputs: shape(seq_length, batch_size, dim)
+        mask: shape(seq_length, batch_size)
+        """
+        logits = self.dense(inputs)
+        mask = F.expand_dims(mask, axis=-1)
+        neg = -1e18 * F.ones_like(logits)
+        scores = F.softmax(F.where(mask, logits, neg), axis=0) * mask
+        return F.sum(F.broadcast_mul(inputs, scores), axis=0)
+
+
+class FCLayerWithAttention(nn.HybridBlock):
+
+    def __init__(
+        self, num_layers, hidden_size=512, activation='relu', output_size=1,
+        prefix='attfc_', **kwargs
+    ):
+        super().__init__(prefix=prefix, **kwargs)
+        with self.name_scope():
+            self.attention = _HybridConcurrent(axis=1, prefix='att_')
+            with self.attention.name_scope():
+                for i in range(output_size):
+                    self.attention.add(AttentionCell(prefix=f'o{i}_'))
+            self.fc_layer = FCLayer(
+                num_layers, hidden_size=hidden_size,
+                activation=activation, output_size=1
+            )
+
+    def hybrid_forward(self, F, inputs, mask):
+        """
+        inputs: shape(seq_length, batch_size, dim)
+        mask: shape(seq_length, batch_size)
+        """
+        # (batch_size, output_size, dim)
+        output = self.attention(inputs, mask)
+        return F.squeeze(self.fc_layer(output), axis=-1)
 
 
 class TextCNN(nn.HybridBlock):
@@ -56,7 +114,7 @@ class TextCNN(nn.HybridBlock):
 
     def hybrid_forward(self, F, inputs, mask):
         """
-        inputs: shape(seq_length, batch_size)
+        inputs: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
         cnn_output = self.cnn_dropout(
@@ -81,18 +139,24 @@ class TextRNN(nn.HybridBlock):
                 cell_clip=cell_clip, projection_clip=projection_clip,
                 dropout=dropout, prefix='rnn_'
             )
-            self.fc_layer = FCLayer(
+            if self._dense_connection == 'attention':
+                fc_layer = FCLayerWithAttention
+            else:
+                fc_layer = FCLayer
+            self.fc_layer = fc_layer(
                 num_layers=num_fc_layers, hidden_size=fc_hidden_size,
                 activation=fc_activation, output_size=output_size
             )
 
     def hybrid_forward(self, F, inputs, mask):
         """
-        inputs: shape(seq_length, batch_size)
+        inputs: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
         rnn_output, _ = self.rnn_layer(inputs, states=None, mask=mask)
-        if self._dense_connection == 'last':
+        if self._dense_connection == 'attention':
+            return self.fc_layer(rnn_output, mask)
+        elif self._dense_connection == 'last':
             forward_output, backward_output = F.split(
                 rnn_output, axis=-1, num_outputs=2
             )
@@ -125,6 +189,7 @@ class TextRCNN(nn.HybridBlock):
                 cell_clip=cell_clip, projection_clip=projection_clip,
                 dropout=dropout, prefix='rnn_'
             )
+            self.input_dropout = nn.Dropout(dropout)
             self.dense = nn.Dense(
                 fc_hidden_size, flatten=False,
                 activation='tanh', prefix='dense_'
@@ -140,7 +205,12 @@ class TextRCNN(nn.HybridBlock):
         mask: shape(seq_length, batch_size)
         """
         rnn_output, _ = self.rnn_layer(inputs, states=None, mask=mask)
-        mixed_output = self.dense(F.concat(inputs, rnn_output, dim=-1))
+        dropped_inputs = self.input_dropout(inputs)
+        mixed_output = self.dense(F.SequenceMask(
+            F.concat(dropped_inputs, rnn_output, dim=-1),
+            sequence_length=F.sum(mask, axis=0),
+            use_sequence_length=True
+        ))
         kmaxpooling_output = F.topk(
             mixed_output, axis=0, ret_typ='value', k=self._kmax
         )
