@@ -4,7 +4,7 @@ import mxnet as mx
 
 from .data import NLPDataset
 from .data.sampler import BatchSampler
-from .data.dataloader import PrefetchDataLoader
+from .data.dataloader import PrefetchDataLoader, DataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +144,9 @@ class BaseModel:
                 logger.info(
                     f'epoch {epoch}, batch {num_batch}, '
                     f'batch_train_loss: {batch_loss:.4}, '
-                    f'speed: {speed} batches/s.'
+                    f'speed: {speed * steps} samples/s.'
                 )
+        data_iter.reset()
         return total_loss / num_batch
 
     def _batch_loss(self, loss, *args):
@@ -190,7 +191,7 @@ class BaseModel:
         if self._prefetch > 0:
             return PrefetchDataLoader(batch_sampler, batch_size)
         else:
-            return batch_sampler
+            return DataLoader(batch_sampler, batch_size)
 
     def save(self, file_path: str) -> None:
         raise NotImplementedError('save model function is not implemented.')

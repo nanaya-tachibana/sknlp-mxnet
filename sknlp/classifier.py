@@ -177,6 +177,7 @@ class DeepClassifier(DeepSupervisedModel):
                 self._calculate_logits, one_batch, self._ctx, batch_axis=1
             ):
                 predictions.extend(self._decode(logits.asnumpy(), threshold))
+        dataloader.reset()
         if return_origin_label:
             if self._is_multilabel:
                 predictions = self._debinarize(predictions)
