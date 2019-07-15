@@ -39,8 +39,8 @@ class FCLayer(nn.HybridBlock):
                     else:
                         self.net.add(nn.Activation(activation))
 
-    def hybrid_forward(self, F, inputs):
-        return self.net(inputs)
+    def hybrid_forward(self, F, input):
+        return self.net(input)
 
 
 class AttentionCell(nn.HybridBlock):
@@ -50,16 +50,16 @@ class AttentionCell(nn.HybridBlock):
         with self.name_scope():
             self.dense = nn.Dense(1, activation=activation, flatten=False)
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, input, mask):
         """
-        inputs: shape(seq_length, batch_size, dim)
+        input: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
-        logits = self.dense(inputs)
+        logits = self.dense(input)
         mask = F.expand_dims(mask, axis=-1)
         neg = -1e18 * F.ones_like(logits)
         scores = F.softmax(F.where(mask, logits, neg), axis=0) * mask
-        return F.sum(F.broadcast_mul(inputs, scores), axis=0)
+        return F.sum(F.broadcast_mul(input, scores), axis=0)
 
 
 class FCLayerWithAttention(nn.HybridBlock):
@@ -79,13 +79,13 @@ class FCLayerWithAttention(nn.HybridBlock):
                 activation=activation, output_size=1
             )
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, input, mask):
         """
-        inputs: shape(seq_length, batch_size, dim)
+        input: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
         # (batch_size, output_size, dim)
-        output = self.attention(inputs, mask)
+        output = self.attention(input, mask)
         return F.squeeze(self.fc_layer(output), axis=-1)
 
 
@@ -98,28 +98,33 @@ class TextCNN(nn.HybridBlock):
         num_fc_layers=2, fc_hidden_size=512, fc_activation='relu', **kwargs
     ):
         super().__init__(**kwargs)
+        self._dropout = dropout
         with self.name_scope():
-            self.input_dropout = nn.Dropout(dropout)
+            if self._dropout:
+                self.input_dropout = nn.Dropout(dropout)
+                self.cnn_dropout = nn.Dropout(dropout)
             self.cnn_layer = ConvolutionalEncoder(
                 embed_size=embed_size, num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
                 output_size=None, num_highway=num_highway, prefix='cnn_'
             )
-            self.cnn_dropout = nn.Dropout(dropout)
             self.fc_layer = FCLayer(
                 num_layers=num_fc_layers, hidden_size=fc_hidden_size,
                 activation=fc_activation, output_size=output_size
             )
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, input, mask):
         """
-        inputs: shape(seq_length, batch_size, dim)
+        input: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
-        cnn_output = self.cnn_dropout(
-            self.cnn_layer(self.input_dropout(inputs), mask)
-        )
+        if self._dropout:
+            cnn_output = self.cnn_dropout(
+                self.cnn_layer(self.input_dropout(input), mask)
+            )
+        else:
+            cnn_output = self.cnn_layer(input, mask)
         return self.fc_layer(cnn_output)
 
 
@@ -148,12 +153,12 @@ class TextRNN(nn.HybridBlock):
                 activation=fc_activation, output_size=output_size
             )
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, input, mask):
         """
-        inputs: shape(seq_length, batch_size, dim)
+        input: shape(seq_length, batch_size, dim)
         mask: shape(seq_length, batch_size)
         """
-        rnn_output, _ = self.rnn_layer(inputs, states=None, mask=mask)
+        rnn_output, _ = self.rnn_layer(input, states=None, mask=mask)
         if self._dense_connection == 'attention':
             return self.fc_layer(rnn_output, mask)
         elif self._dense_connection == 'last':
@@ -183,13 +188,15 @@ class TextRCNN(nn.HybridBlock):
     ):
         super().__init__(**kwargs)
         self._kmax = kmax
+        self._dropout = dropout
         with self.name_scope():
+            if self._dropout:
+                self.input_dropout = nn.Dropout(dropout)
             self.rnn_layer = BiLSTMWithClip(
                 num_rnn_layers, projection_size, hidden_size=hidden_size,
                 cell_clip=cell_clip, projection_clip=projection_clip,
                 dropout=dropout, prefix='rnn_'
             )
-            self.input_dropout = nn.Dropout(dropout)
             self.dense = nn.Dense(
                 fc_hidden_size, flatten=False,
                 activation='tanh', prefix='dense_'
@@ -199,15 +206,16 @@ class TextRCNN(nn.HybridBlock):
                 activation=fc_activation, output_size=output_size
             )
 
-    def hybrid_forward(self, F, inputs, mask):
+    def hybrid_forward(self, F, input, mask):
         """
-        inputs: shape(seq_length, batch_size)
+        input: shape(seq_length, batch_size)
         mask: shape(seq_length, batch_size)
         """
-        rnn_output, _ = self.rnn_layer(inputs, states=None, mask=mask)
-        dropped_inputs = self.input_dropout(inputs)
+        rnn_output, _ = self.rnn_layer(input, states=None, mask=mask)
+        if self._dropout:
+            input = self.input_dropout(input)
         mixed_output = self.dense(F.SequenceMask(
-            F.concat(dropped_inputs, rnn_output, dim=-1),
+            F.concat(input, rnn_output, dim=-1),
             sequence_length=F.sum(mask, axis=0),
             use_sequence_length=True
         ))
@@ -252,12 +260,12 @@ class TextTransformer(nn.HybridBlock):
                 activation=fc_activation, output_size=output_size
             )
 
-    def hybrid_forward(self, F, inputs, mask, steps=None):
+    def hybrid_forward(self, F, input, mask, steps=None):
         """
-        inputs: shape(seq_length, batch_size)
+        input: shape(seq_length, batch_size)
         mask: shape(seq_length, batch_size)
         """
-        transformer_output = self.transformer_layer(inputs, steps, mask)
+        transformer_output = self.transformer_layer(input, steps, mask)
         valid_length = F.sum(mask, axis=1)
         sentence_vec = F.broadcast_div(
             F.sum(
