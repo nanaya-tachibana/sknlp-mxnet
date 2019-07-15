@@ -8,13 +8,13 @@ from typing import List, Tuple, Union, Optional
 
 import mxnet as mx
 from mxnet.gluon import nn
-import gluonnlp
 
 from .data.sampler import BPTTBatchSampler
 from .data.dataloader import PrefetchDataLoader
 from .base import BaseModel
 from .vocab import Vocab
-from .loss import AdaptiveSoftmax, FullSoftmax, ElmoLoss
+from .module import BiLSTM
+from .loss import AdaptiveSoftmax, ElmoLoss
 
 
 logger = logging.getLogger(__name__)
@@ -46,13 +46,12 @@ class TokenEmbedding(Embedding):
                 init=mx.init.Uniform(1), grad_stype='row_sparse'
             )
 
-    def hybrid_forward(self, F, inputs, weight):
+    def hybrid_forward(self, F, input, weight):
         """
-        inputs: shape(seq_length, batch_size)
+        input: shape(seq_length, batch_size)
         """
         return F.Embedding(
-            inputs, weight, len(self._vocab),
-            self._embed_size, sparse_grad=True
+            input, weight, len(self._vocab), self._embed_size, sparse_grad=True
         )
 
 
@@ -69,33 +68,56 @@ class Elmo(Embedding):
                 'weight', shape=(len(vocab), embed_size),
                 init=mx.init.Uniform(1), grad_stype='row_sparse'
             )
-            self.bilm = gluonnlp.model.BiLMEncoder(
-                'lstmpc', num_layers, embed_size, hidden_size, dropout=dropout,
-                skip_connection=skip_connection, proj_size=projection_size,
-                cell_clip=cell_clip, proj_clip=projection_clip, prefix='bilm_'
+            self.bilm = BiLSTM(
+                num_layers, projection_size, input_size=embed_size,
+                hidden_size=hidden_size,
+                dropout=dropout, cell_clip=cell_clip, return_all_layers=True,
+                prefix='bilm_'
             )
+            self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
-    def hybrid_forward(self, F, inputs, states, mask, weight):
+    def hybrid_forward(self, F, input, states, mask, weight):
         """
-        inputs: shape(seq_length, batch_size)
+        input: shape(seq_length, batch_size)
         """
         embed = F.Embedding(
-            inputs, weight, len(self._vocab),
-            self._embed_size, sparse_grad=True
+            input, weight, len(self._vocab), self._embed_size, sparse_grad=True
         )
-        return self.bilm(embed, states, F.transpose(mask, axes=(1, 0)))
+        return self.bilm(embed, states, mask)
 
-    def __call__(self, inputs, states=None, mask=None, **kwargs):
+    def __call__(self, input, states=None, mask=None, **kwargs):
         if states is None:
-            if isinstance(inputs, mx.ndarray.NDArray):
-                batch_size = inputs.shape[1]
+            if isinstance(input, mx.ndarray.NDArray):
+                batch_size = input.shape[1]
                 states = self.bilm.begin_state(
                     batch_size=batch_size, func=mx.ndarray.zeros,
-                    ctx=inputs.context, dtype=inputs.dtype
+                    ctx=input.context, dtype=input.dtype
                 )
             else:
                 states = self.bilm.begin_state(func=mx.symbol.zeros)
-        return super().__call__(inputs, states, mask, **kwargs)
+        return super().__call__(input, states, mask, **kwargs)
+
+    def valid(self, input, states, mask, labels):
+        if isinstance(input, mx.ndarray.NDArray):
+            F = mx.ndarray
+            weight = self.weight.data(input.context)
+        else:
+            F = mx.symbol
+            weight = self.weight.var()
+        embed = F.Embedding(
+            input, weight, len(self._vocab), self._embed_size, sparse_grad=True
+        )
+        input, states = self.bilm(embed, states, mask)
+        last_layer = F.squeeze(
+            F.slice_axis(input, begin=-1, end=None, axis=0), axis=0
+        )
+        forward_input, backward_input = F.split(last_layer, axis=-1, num_outputs=2)
+        logits = F.dot(
+            F.reshape(forward_input, shape=(-3, -1)), weight, transpose_b=True
+        )
+        labels = F.reshape(labels, shape=(-1, ))
+        mask = F.reshape(mask, shape=(-1, ))
+        return self.softmaxce(logits, labels) * mask, states
 
 
 class Token2vec(BaseModel):
@@ -114,7 +136,7 @@ class Token2vec(BaseModel):
         }
         if loss is None:
             self.loss = None
-        elif loss == 'adaptive':
+        else:
             self.loss = AdaptiveSoftmax(
                 embed_size, len(vocab), cutoffs=cutoffs, div_factor=div_factor,
             )
@@ -122,8 +144,6 @@ class Token2vec(BaseModel):
                 'cutoffs': tuple(cutoffs),
                 'div_factor': div_factor,
             })
-        else:
-            self.loss = FullSoftmax(embed_size, len(vocab))
         self.model = model
 
     def _build(self, ctx, initialize=True):
@@ -153,9 +173,8 @@ class Token2vec(BaseModel):
         self, train_dataset=None, valid_dataset=None, batch_size=32,
         sequence_length=20, last_batch='keep', n_epochs=15, optimizer='adam',
         lr: float = 1e-3, lr_update_factor: float = 0.9,
-        lr_update_steps: int = 1000,
-        clip=1.0, checkpoint=None, save_frequency=1,
-        prefecth=0
+        lr_update_steps: int = 1000, clip: float = 1.0, checkpoint=None,
+        save_frequency=1, prefetch=0
     ):
         """
         Fit model.
@@ -183,7 +202,7 @@ class Token2vec(BaseModel):
         save_frequency: int
           If checkpoint is not None, save model every `save_frequency` epochs.
         """
-        self._prefetch = prefecth
+        self._prefetch = prefetch
         if not self._trained:
             self._build(self._ctx)
 
@@ -201,8 +220,8 @@ class Token2vec(BaseModel):
     def _batch_loss(self, loss, *args):
         return loss / args[1].sum()
 
-    def __call__(self, inputs):
-        return self.model(inputs)
+    def __call__(self, input):
+        return self.model(input)
 
     def collect_params(self):
         return self._collect_params()
@@ -286,17 +305,14 @@ class Token2vecElmo(Token2vec):
         if loss is None:
             self.loss = None
         else:
-            if loss == 'adaptive':
-                loss_func = AdaptiveSoftmax(
-                    embed_size, len(vocab),
-                    cutoffs=cutoffs, div_factor=div_factor,
-                )
-                self.meta.update({
-                    'cutoffs': tuple(cutoffs),
-                    'div_factor': div_factor,
-                })
-            else:
-                loss_func = FullSoftmax(embed_size, len(vocab))
+            loss_func = AdaptiveSoftmax(
+                embed_size, len(vocab),
+                cutoffs=cutoffs, div_factor=div_factor,
+            )
+            self.meta.update({
+                'cutoffs': tuple(cutoffs),
+                'div_factor': div_factor,
+            })
             self.loss = ElmoLoss(loss_func)
         self.meta.update({
             'num_layers': num_layers,
@@ -309,14 +325,21 @@ class Token2vecElmo(Token2vec):
         })
 
     def _calculate_loss(
-        self, states, inputs, mask, forward_labels, backward_labels,
+        self, states, input, mask, forward_labels, backward_labels,
     ):
-        out, states = self.model(inputs, states, mask)
+        total_batch_size = input.shape[0] * input.shape[1] * 2
+        out, states = self.model(input, states, mask)
         return self.loss(
             out, mask,
             forward_labels.astype(dtype='float32'),
-            backward_labels.astype(dtype='float32')
+            backward_labels.astype(dtype='float32'),
+            mx.nd.arange(total_batch_size, ctx=input.context)
         ), states
+
+    def _calculate_oneway_loss(
+        self, states, input, mask, forward_labels, backward_labels
+    ):
+        return self.model.valid(input, states, mask, forward_labels)
 
     def _forward(self, func, one_batch, ctx, batch_axis=1):
         res = []
@@ -328,15 +351,16 @@ class Token2vecElmo(Token2vec):
             res.append(func(*one_part))
         return res
 
-    def _forward_backward(self, one_batch, ctx, batch_axis=1):
+    def _forward_backward(self, one_batch, ctx, batch_axis=1, grad=True):
         with mx.autograd.record():
             res = self._forward(
                 self._calculate_loss, one_batch, ctx, batch_axis
             )
             losses = [r[0] for r in res]
             self._states_list = _detach([r[1] for r in res])
-        for loss in losses:
-            loss.backward()
+        if grad:
+            for loss in losses:
+                loss.backward()
         return sum(loss.sum().asscalar() for loss in losses)
 
     def _before_epoch(self, *arg, **kwargs):
@@ -376,6 +400,13 @@ class Token2vecElmo(Token2vec):
         ctx = self._ctx
         self._before_epoch(dataloader=dataloader)
         for one_batch in dataloader:
-            total_loss += self._forward_backward(one_batch, ctx)
+            states_list = []
+            for loss, states in self._forward(
+                self._calculate_loss, one_batch, self._ctx
+            ):
+                total_loss += loss.sum().asscalar()
+                states_list.append(states)
+            self._states_list = _detach(states_list)
             total_word += one_batch[1].sum()
+        dataloader.reset()
         return total_loss / total_word

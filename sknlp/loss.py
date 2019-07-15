@@ -1,29 +1,11 @@
 from typing import List, Union, Optional
+import functools
 import math
 import mxnet as mx
 from mxnet.gluon import nn
 
 
 HybridType = Union[mx.ndarray.NDArray, mx.symbol.Symbol]
-
-
-class FullSoftmax(nn.HybridBlock):
-
-    def __init__(self, input_size: int, num_classes: int, **kwargs) -> None:
-        super().__init__(**kwargs)
-        with self.name_scope():
-            self.dense_layer = nn.Dense(
-                num_classes, flatten=False,
-                weight_initializer=mx.init.Normal(1 / math.sqrt(input_size)),
-                prefix='proj_'
-            )
-            self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
-
-    def hybrid_forward(
-        self, F, inputs: HybridType, labels: HybridType
-    ) -> HybridType:
-        logits = self.dense_layer(inputs)
-        return self.softmaxce(logits, labels)
 
 
 class AdaptiveSoftmax(nn.HybridBlock):
@@ -76,7 +58,7 @@ class AdaptiveSoftmax(nn.HybridBlock):
             self.head_layer = nn.Dense(
                 head_size, flatten=False, use_bias=False,
                 weight_initializer=mx.init.Normal(1 / math.sqrt(input_size)),
-                prefix='head_'
+                prefix='head_', in_units=input_size
             )
             self.tail_layers: List[mx.gluon.HybridBlock] = []
             for i in range(self._num_clusters):
@@ -84,12 +66,12 @@ class AdaptiveSoftmax(nn.HybridBlock):
                 with tail_layer.name_scope():
                     tail_layer.add(nn.Dense(
                         projection_sizes[i], flatten=False, use_bias=False,
-                        prefix='proj_'
+                        prefix='proj_', in_units=input_size
                     ))
                     tail_layer.add(nn.Dense(
                         self._cutoffs[i + 1] - self._cutoffs[i],
                         flatten=False, use_bias=False,
-                        prefix='w_'
+                        prefix='w_', in_units=projection_sizes[i]
                     ))
                 self.tail_layers.append(tail_layer)
                 # Note that Blocks inside the list, tuple or dict will
@@ -98,14 +80,31 @@ class AdaptiveSoftmax(nn.HybridBlock):
             self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
     def hybrid_forward(
-        self, F, inputs: HybridType, labels: HybridType
+        self, F, input: HybridType, labels: HybridType, help_idx: HybridType,
     ) -> HybridType:
         '''
         Parameters
         ----------
-        inputs: shape(batch_size, ``num_classes``)
+        input: shape(batch_size, ``num_classes``)
         labels: shape(batch_size, )
+        help_idx: shape(batch_size, )
         '''
+        def update_tail_loss(tail_loss, mask, tail_layer, offset):
+            # compute tail loss
+            # shape(sum(mask), num_classes)
+            tail_input = F.contrib.boolean_mask(input, mask)
+            # shape(batch_size, cutoffs[i + 1] - cutoffs[i])
+            tail_logits = tail_layer(tail_input)
+            # shape(sum(mask), )
+            tail_labels = F.contrib.boolean_mask(
+                labels - offset, mask
+            )
+            idx = F.contrib.boolean_mask(help_idx, mask)
+            pred = -F.log_softmax(tail_logits, axis=-1)
+            return F.contrib.index_copy(
+                tail_loss, idx, F.pick(pred, tail_labels)
+            )
+
         head_labels = labels
         ones = F.ones_like(labels)
         tail_loss = F.zeros_like(labels)
@@ -118,19 +117,13 @@ class AdaptiveSoftmax(nn.HybridBlock):
             head_labels = F.where(
                 mask, ones * (self._cutoffs[0] + i), head_labels
             )
-            # compute tail loss
-            # shape(sum(mask), num_classes)
-            # tail_inputs = F.contrib.boolean_mask(inputs, mask)
-            # shape(batch_size, cutoffs[i + 1] - cutoffs[i])
-            tail_logits = self.tail_layers[i](inputs)
-            # shape(sum(mask), )
-            # tail_labels = F.contrib.boolean_mask(labels - self._cutoffs[i], mask)
-            tail_labels = labels - self._cutoffs[i]
-            pred = F.log_softmax(tail_logits, axis=-1)
-            tail_loss = F.where(
-                mask, -F.pick(pred, tail_labels), tail_loss,
+            tail_loss = F.contrib.cond(
+                F.sum(mask) > 0,
+                functools.partial(update_tail_loss, tail_loss, mask, self.tail_layers[i], self._cutoffs[i]),
+                lambda: tail_loss
             )
-        head_logits = self.head_layer(inputs)
+
+        head_logits = self.head_layer(input)
         head_loss = self.softmaxce(head_logits, head_labels)
         return head_loss + tail_loss
 
@@ -144,29 +137,23 @@ class ElmoLoss(nn.HybridBlock):
 
     def hybrid_forward(
         self, F,
-        inputs: HybridType,
+        input: HybridType,
         mask: HybridType,
         forward_labels: HybridType,
-        backward_labels: HybridType
+        backward_labels: HybridType,
+        help_idx: HybridType
     ) -> HybridType:
         # can't work with ndarray now
-        # last_layer = F.SequenceLast(inputs)
-        # length = mask.sum(axis=0)
-        # sequence_mask = F.reshape(
-        #     F.SequenceMask(
-        #         mask, sequence_length=length - 1, use_sequence_length=True
-        #     ),
-        #     shape=(-1, )
-        # )
+        # last_layer = F.SequenceLast(input)
         last_layer = F.squeeze(
-            F.slice_axis(inputs, begin=-1, end=None, axis=0), axis=0
+            F.slice_axis(input, begin=-1, end=None, axis=0), axis=0
         )
-        forward_inputs, backward_inputs = F.split(
+        forward_input, backward_input = F.split(
             last_layer, axis=-1, num_outputs=2
         )
-        forward_backward_inputs = F.concat(
-            F.reshape(forward_inputs, shape=(-3, -1)),
-            F.reshape(backward_inputs, shape=(-3, -1)),
+        forward_backward_input = F.concat(
+            F.reshape(forward_input, shape=(-3, -1)),
+            F.reshape(backward_input, shape=(-3, -1)),
             dim=0
         )
         forward_backward_labels = F.concat(
@@ -174,22 +161,7 @@ class ElmoLoss(nn.HybridBlock):
             F.reshape(backward_labels, shape=(-1, )),
             dim=0
         )
-        # forward_loss = self.loss_func(
-        #     F.reshape(forward_inputs, shape=(-3, -1)),
-        #     F.reshape(forward_labels, shape=(-1, ))
-        # ) * sequence_mask
-
-        # reversed_backward_inputs = F.SequenceReverse(
-        #     backward_inputs, sequence_length=length, use_sequence_length=True
-        # )
-        # reversed_backward_labels = F.SequenceReverse(
-        #     backward_labels, sequence_length=length, use_sequence_length=True
-        # )
-        # backward_loss = self.loss_func(
-        #     F.reshape(reversed_backward_inputs, shape=(-3, -1)),
-        #     F.reshape(reversed_backward_labels, shape=(-1, ))
-        # ) * sequence_mask
         mask = F.reshape(F.tile(mask, reps=(2, 1)), shape=(-1, ))
         return 0.5 * self.loss_func(
-            forward_backward_inputs, forward_backward_labels
+            forward_backward_input, forward_backward_labels, help_idx
         ) * mask
