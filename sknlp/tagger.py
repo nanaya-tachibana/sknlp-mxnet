@@ -1,5 +1,6 @@
 import functools
 import itertools
+from collections import defaultdict
 
 import os
 import tempfile
@@ -10,16 +11,19 @@ import logging
 import numpy as np
 import mxnet as mx
 from mxnet.gluon import nn
-from sklearn.metrics import precision_recall_fscore_support
 
 import gluonnlp
 
 from .base import DeepSupervisedModel
 from .data import Pad, InMemoryDataset, SequenceTagDataset
 from .utils.array import sequence_mask
+
 from .embedding import Token2vec
 from .crf import Crf, viterbi_decode
 from .encode import TextRNN
+
+from .metric.f_score import ner_f_score
+
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +96,15 @@ class DeepTagger(DeepSupervisedModel):
     def _valid_log(self, valid_dataset):
         self._decode = self._create_decoder(
             self.loss.transitions.data().asnumpy())
-        scores, avg_score = self.score(dataset=valid_dataset)
-        for l, p, r, f, _ in zip(self.idx2labels(
-                list(range(self._num_classes))), *scores):
+        scores = self.score(dataset=valid_dataset)
+        for key in scores:
             logger.info(
-                f'label: {l} precision: {p}, recall: {r}, f1: {f}'
+                f'label: {key} '
+                f'precision: {scores[key][0]}, '
+                f'recall: {scores[key][1]}, '
+                f'f1: {scores[key][2]}'
             )
-        p, r, f, _ = avg_score
-        logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
-                    f'{round(r * 100, 2)})')
-        return f
+        return scores
 
     def _calculate_logits(self, inputs, mask, *args):
         return self.encode_layer(self.embedding_layer(inputs), mask)
@@ -129,7 +132,8 @@ class DeepTagger(DeepSupervisedModel):
         assert dataset or X
         if dataset is None:
             dataset = self._get_or_build_dataset(dataset, X, ['O'] * len(X))
-        self.idx2labels = dataset.idx2labels
+        if not hasattr(self, 'idx2labels'):
+            self.idx2labels = dataset.idx2labels
         dataloader = self._build_dataloader(dataset, batch_size, False, 'keep')
 
         predictions = []
@@ -146,18 +150,11 @@ class DeepTagger(DeepSupervisedModel):
     def score(self, X=None, y=None, dataset=None, batch_size=512):
         assert self._trained
         dataset = self._get_or_build_dataset(dataset, X, y)
-        predictions = self.predict(dataset=dataset, return_origin_label=False)
-        y = list(itertools.chain(*[label for _, label in dataset]))
-        predictions = list(itertools.chain(*predictions))
-        return (
-            precision_recall_fscore_support(
-                y, predictions, labels=list(range(self._num_classes))
-            ),
-            precision_recall_fscore_support(
-                y, predictions, labels=list(range(self._num_classes)),
-                average='micro'
-            )
-        )
+        predictions = self.predict(dataset=dataset)
+        texts, labels = zip(*[
+            (text, self.idx2labels(label)) for text, label in dataset
+        ])
+        return ner_f_score(texts, labels, predictions)
 
     def save(self, file_path: str) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

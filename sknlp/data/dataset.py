@@ -177,6 +177,9 @@ class SupervisedNLPDataset(NLPDataset):
             self._label2idx = label2idx
         self._idx2label = {v: k for k, v in self._label2idx.items()}
 
+    def idx2tokens(self, idx_list: List[int]) -> List[str]:
+        return self._vocab.to_tokens(idx_list)
+
     def _preprocess_label(self, label: str) -> List[int]:
         return [self._label2idx[l] for l in label.split('|')]
 
