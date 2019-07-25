@@ -261,12 +261,13 @@ class Token2vec(BaseModel):
 
     @classmethod
     def load(cls, file_path, update=False, ctx=mx.cpu()):
-        meta, model, vocab = cls._load(file_path, ctx)
         if not update:
+            meta, model, vocab = cls._load(file_path, ctx)
             for name, param in model.collect_params().items():
                 param.grad_req = 'null'
             meta['loss'] = None
         else:
+            meta, model, vocab = cls._load(file_path, mx.cpu())
             sym_model = model
             model = TokenEmbedding(
                 vocab, meta['embed_size'], prefix=meta['prefix']
@@ -351,27 +352,21 @@ class Token2vecElmo(Token2vec):
             res.append(func(*one_part))
         return res
 
-    def _forward_backward(self, one_batch, ctx, batch_axis=1, grad=True):
+    def _forward_backward(self, one_batch, ctx, grad=True):
         with mx.autograd.record():
-            res = self._forward(
-                self._calculate_loss, one_batch, ctx, batch_axis
-            )
-            losses = [r[0] for r in res]
-            self._states_list = _detach([r[1] for r in res])
+            loss, states = self._forward(self._calculate_loss, one_batch)
+            self.states = _detach(states)
         if grad:
-            for loss in losses:
-                loss.backward()
-        return sum(loss.sum().asscalar() for loss in losses)
+            loss.backward()
+        return loss.sum().asscalar()
 
     def _before_epoch(self, *arg, **kwargs):
         super()._before_epoch(*arg, **kwargs)
         dataloader = kwargs['dataloader']
-        self._states_list = [
-            self.model.bilm.begin_state(
-                batch_size=dataloader._batch_size // len(self._ctx),
-                func=mx.ndarray.zeros, ctx=context
-            ) for context in self._ctx
-        ]
+        self.states = self.model.bilm.begin_state(
+            batch_size=dataloader.batch_size,
+            func=mx.ndarray.zeros, ctx=self._ctx
+        )
 
     def _build_dataloader(
         self, dataset, batch_size, sequence_length,
@@ -397,16 +392,11 @@ class Token2vecElmo(Token2vec):
         )
         total_loss = 0
         total_word = 0
-        ctx = self._ctx
         self._before_epoch(dataloader=dataloader)
         for one_batch in dataloader:
-            states_list = []
-            for loss, states in self._forward(
-                self._calculate_loss, one_batch, self._ctx
-            ):
-                total_loss += loss.sum().asscalar()
-                states_list.append(states)
-            self._states_list = _detach(states_list)
+            loss, states = self._forward(self._calculate_loss, one_batch)
+            total_loss += loss.sum().asscalar()
+            self.states = _detach(states)
             total_word += one_batch[1].sum()
         dataloader.reset()
         return total_loss / total_word

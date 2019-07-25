@@ -1,6 +1,4 @@
 import functools
-import itertools
-from collections import defaultdict
 
 import os
 import tempfile
@@ -138,11 +136,9 @@ class DeepTagger(DeepSupervisedModel):
 
         predictions = []
         for one_batch in dataloader:
-            for logits in self._forward(
-                self._calculate_logits, one_batch, self._ctx, batch_axis=1
-            ):
-                mask = one_batch[1]
-                predictions.extend(self._decode(logits.asnumpy(), mask))
+            logits = self._forward(self._calculate_logits, one_batch)
+            mask = one_batch[1]
+            predictions.extend(self._decode(logits.asnumpy(), mask))
         if return_origin_label:
             return [self.idx2labels(idx) for idx in predictions]
         return predictions

@@ -2,6 +2,11 @@ import time
 import logging
 import mxnet as mx
 
+try:
+    import horovod.mxnet as hvd
+except ImportError:
+    hvd = None
+
 from .data import NLPDataset
 from .data.sampler import BatchSampler
 from .data.dataloader import PrefetchDataLoader, DataLoader
@@ -11,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class BaseModel:
 
-    def __init__(self, ctx=None):
-        self._ctx = [mx.cpu()] if ctx is None else ctx
+    def __init__(self, ctx=mx.cpu()):
+        self._ctx = ctx
         self._prefetch = 0
         self._trained = False
         self._trainable = dict()
@@ -24,10 +29,11 @@ class BaseModel:
         n_epochs: int = 100,
         optimizer: str = 'adam',
         lr_update_factor: float = 0.9,
-        lr_update_steps: int = 1000,
+        lr_update_epochs: int = 1,
         clip: float = 5,
         checkpoint: str = None,
         save_frequency: int = 1,
+        multigpu=False,
     ):
         """
         Help function for model fitting.
@@ -63,14 +69,24 @@ class BaseModel:
         """
         assert len(self._trainable) > 0, 'No trainable parameters'
 
-        lr_scheduler = mx.lr_scheduler.FactorScheduler(
-            step=lr_update_steps, factor=lr_update_factor
-        )
-        optimizer_params = {'learning_rate': lr, 'lr_scheduler': lr_scheduler}
+        optimizer_params = {'learning_rate': lr}
         params_dict = self._collect_params()
-        trainer = mx.gluon.Trainer(params_dict, optimizer, optimizer_params)
+        if hvd is not None and multigpu:
+            # Create DistributedTrainer, a subclass of gluon.Trainer
+            hvd.broadcast_parameters(params_dict, root_rank=0)
+            trainer = hvd.DistributedTrainer(
+                params_dict, optimizer, optimizer_params
+            )
+        else:
+            trainer = mx.gluon.Trainer(
+                params_dict, optimizer, optimizer_params
+            )
         for epoch in range(1, n_epochs + 1):
-            self._before_epoch(trainer=trainer, dataloader=train_dataloader)
+            self._before_epoch(
+                update_lr=epoch % lr_update_epochs == 0 and epoch != 1,
+                lr_update_factor=lr_update_factor,
+                trainer=trainer, dataloader=train_dataloader
+            )
             avg_loss = self._one_epoch(trainer, train_dataloader, epoch, clip)
             self._train_log(avg_loss)
             self._trained = True
@@ -78,7 +94,7 @@ class BaseModel:
                 self.save(f'{checkpoint}-{epoch:04}')
 
             if valid_dataset is not None:
-                score = self._valid_log(valid_dataset)
+                self._valid_log(valid_dataset)
 
     def _collect_params(self):
         params_dict = mx.gluon.ParameterDict()
@@ -88,56 +104,51 @@ class BaseModel:
 
     def _clip_gradient(self, clip, ctx):
         params_dict = self._collect_params()
-        for context in ctx:
-            clip_params = [
-                p.data(context) for p in params_dict.values()
-            ]
-            norm = mx.nd.array([0.0], context)
+        clip_params = [
+            p.data() for p in params_dict.values()
+        ]
+        norm = mx.nd.array([0.0], ctx)
+        for param in clip_params:
+            if param.grad is not None:
+                norm += (param.grad ** 2).sum()
+        norm = norm.sqrt().asscalar()
+        if norm > clip:
             for param in clip_params:
                 if param.grad is not None:
-                    norm += (param.grad ** 2).sum()
-            norm = norm.sqrt().asscalar()
-            if norm > clip:
-                for param in clip_params:
-                    if param.grad is not None:
-                        param.grad[:] *= clip / norm
+                    param.grad[:] *= clip / norm
 
-    def _forward(self, func, one_batch, ctx, batch_axis=1):
-        res = []
-        for one_part in zip(*[
-            mx.gluon.utils.split_and_load(
-                element, ctx, batch_axis=batch_axis
-            ) for element in one_batch
-        ]):
-            res.append(func(*one_part))
-        return res
+    def _forward(self, func, one_batch):
+        ctx = self._ctx
+        return func(*[mx.nd.array(element, ctx) for element in one_batch])
 
-    def _forward_backward(self, one_batch, ctx, batch_axis=1):
+    def _forward_backward(self, one_batch):
         with mx.autograd.record():
-            res = self._forward(
-                self._calculate_loss, one_batch, ctx, batch_axis
-            )
-            losses = [r[0] for r in res]
-        for loss in losses:
-            loss.backward()
-        return sum(loss.sum().asscalar() for loss in losses)
+            loss, states = self._forward(self._calculate_loss, one_batch)
+        loss.backward()
+        return loss.sum().asscalar()
 
     def _before_epoch(self, *arg, **kwargs):
-        pass
+        trainer = kwargs['trainer']
+        lr = trainer.learning_rate
+        if kwargs['update_lr']:
+            new_lr = lr * kwargs['lr_update_factor']
+            trainer.set_learning_rate(new_lr)
+            logger.info('Change learning rate to %e' % new_lr)
 
     def _one_epoch(self, trainer, data_iter, epoch, clip=1.0):
         total_loss = 0
         num_batch = 0
         ctx = self._ctx
         start_time = time.time()
-        batch_axis = data_iter._batch_axis
+        batch_axis = data_iter.batch_axis
         for one_batch in data_iter:
             steps = one_batch[0].shape[batch_axis]
-            loss = self._forward_backward(one_batch, ctx, batch_axis)
+            loss = self._forward_backward(one_batch)
             self._clip_gradient(clip, ctx)
             trainer.step(steps, ignore_stale_grad=True)
-            batch_loss = self._batch_loss(loss, *one_batch)
-            total_loss += batch_loss
+
+            total_loss += loss
+            batch_loss = self._batch_loss(loss, batch_axis, *one_batch)
             num_batch += 1
             if num_batch % 100 == 0:
                 speed = round(num_batch / (time.time() - start_time), 2)
@@ -149,8 +160,8 @@ class BaseModel:
         data_iter.reset()
         return total_loss / num_batch
 
-    def _batch_loss(self, loss, *args):
-        return loss / args[0].shape[1]
+    def _batch_loss(self, loss, batch_axis, *args):
+        return loss / args[0].shape[batch_axis]
 
     def _calculate_loss(self, *args):
         """
@@ -203,8 +214,8 @@ class BaseModel:
 
 class DeepSupervisedModel(BaseModel):
 
-    def __init__(self, vocab=None, label2idx=None, ctx=None, **kwargs):
-        super().__init__(ctx, **kwargs)
+    def __init__(self, vocab=None, label2idx=None, **kwargs):
+        super().__init__(**kwargs)
         self._vocab = vocab
         self._label2idx = label2idx
         self._loss = None
@@ -226,9 +237,9 @@ class DeepSupervisedModel(BaseModel):
         self, X=None, y=None, train_dataset=None,
         valid_X=None, valid_y=None, valid_dataset=None, batch_size=32,
         last_batch='keep', n_epochs=15, optimizer='adam', lr=1e-3,
-        lr_update_factor: float = 0.9,
-        lr_update_steps: int = 1000,
-        clip=5.0, checkpoint=None, save_frequency=1, prefetch=0
+        lr_update_factor: float = 0.9, lr_update_epochs: int = 5,
+        clip=5.0, checkpoint=None, save_frequency=1,
+        prefetch=0, multigpu=False,
     ):
         """
         Fit model.
@@ -280,6 +291,7 @@ class DeepSupervisedModel(BaseModel):
         self._fit(
             dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
             optimizer=optimizer, lr_update_factor=lr_update_factor,
-            lr_update_steps=lr_update_steps, clip=clip, checkpoint=checkpoint,
-            save_frequency=save_frequency
+            lr_update_epochs=lr_update_epochs, clip=clip,
+            checkpoint=checkpoint, save_frequency=save_frequency,
+            multigpu=multigpu
         )

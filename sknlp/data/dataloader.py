@@ -18,6 +18,14 @@ class DataLoader:
     def reset(self):
         pass
 
+    @property
+    def batch_size(self):
+        return self._batch_size
+
+    @property
+    def batch_axis(self):
+        return self._batch_axis
+
 
 class PrefetchDataLoader(DataLoader):
 

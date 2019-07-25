@@ -173,10 +173,8 @@ class DeepClassifier(DeepSupervisedModel):
 
         predictions = []
         for one_batch in dataloader:
-            for logits in self._forward(
-                self._calculate_logits, one_batch, self._ctx, batch_axis=1
-            ):
-                predictions.extend(self._decode(logits.asnumpy(), threshold))
+            logits = self._forward(self._calculate_logits, one_batch)
+            predictions.extend(self._decode(logits.asnumpy(), threshold))
         dataloader.reset()
         if return_origin_label:
             if self._is_multilabel:
@@ -184,9 +182,7 @@ class DeepClassifier(DeepSupervisedModel):
             return self._decode_label(predictions)
         return predictions
 
-    def score(
-        self, X=None, y=None, dataset=None, batch_size=512
-    ):
+    def score(self, X=None, y=None, dataset=None, batch_size=64):
         assert self._trained
         dataset = self._get_or_build_dataset(dataset, X, y)
         predictions = self.predict(
