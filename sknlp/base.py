@@ -147,8 +147,8 @@ class BaseModel:
             self._clip_gradient(clip, ctx)
             trainer.step(steps, ignore_stale_grad=True)
 
-            total_loss += loss
             batch_loss = self._batch_loss(loss, batch_axis, *one_batch)
+            total_loss += batch_loss
             num_batch += 1
             if num_batch % 100 == 0:
                 speed = round(num_batch / (time.time() - start_time), 2)
