@@ -3,5 +3,5 @@ def sequence_mask(arr, length, sequence_axis=0, batch_axis=1):
     for i, l in enumerate(length):
         slices[batch_axis] = slice(i, i + 1)
         slices[sequence_axis] = slice(l, None)
-        arr[slices] = 0
+        arr[tuple(slices)] = 0
     return arr
