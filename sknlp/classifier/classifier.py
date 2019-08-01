@@ -8,32 +8,21 @@ import logging
 
 import mxnet as mx
 from mxnet.gluon import nn
-
 import gluonnlp
-
 import numpy as np
-from scipy.special import expit
-from sklearn.metrics import precision_recall_fscore_support
 
-from .base import DeepSupervisedModel
-from .data import ClassifyDataset, InMemoryDataset
-from .data.batchify import Pad, Stack
-from .utils.array import sequence_mask
-from .embedding import Token2vec
-from .encode import TextCNN, TextRCNN, TextRNN, TextTransformer
-from .segmenter import Segmenter
+from ..base import DeepSupervisedModel
+from ..data import ClassifyDataset, InMemoryDataset
+from ..data.batchify import Pad, Stack
+from ..utils.array import sequence_mask
+from ..embedding import Token2vec
+from ..encode import TextCNN, TextRCNN, TextRNN, TextTransformer
+from ..segmenter import Segmenter
+from ..metric import classify_f_score
+
+from .utils import logits2classes
 
 logger = logging.getLogger(__name__)
-
-
-def _decode(logits, threshold, is_binary=False, is_multilabel=False):
-    if is_binary and not is_multilabel:
-        assert logits.shape[1] == 2
-        return np.where(expit(logits[:, 1]) > threshold, 1, 0)
-    elif is_multilabel:
-        return np.where(expit(logits) > threshold, 1, 0)
-    else:
-        return np.argmax(logits, axis=1)
 
 
 def batchify(padding, one_batch):
@@ -50,8 +39,7 @@ class DeepClassifier(DeepSupervisedModel):
     def __init__(
         self, num_classes, encode_layer, embedding_layer=None,
         vocab=None, is_multilabel=False, label2idx=None,
-        segmenter='jieba', max_length=100, embed_size=100,
-        threshold=None, **kwargs
+        segmenter='jieba', max_length=100, embed_size=100, **kwargs
     ):
         super().__init__(**kwargs)
         self.embedding_layer = embedding_layer
@@ -64,7 +52,6 @@ class DeepClassifier(DeepSupervisedModel):
         self._max_length = max_length
         self._embed_size = embed_size
         self._label2idx = label2idx
-        self._threshold = threshold or dict()
 
         self.meta = {
             'num_classes': num_classes,
@@ -73,7 +60,6 @@ class DeepClassifier(DeepSupervisedModel):
             'max_length': max_length,
             'segmenter': segmenter,
             'embed_size': embed_size,
-            'threshold': threshold
         }
 
     def _build(self, ctx, initialize=True):
@@ -99,52 +85,49 @@ class DeepClassifier(DeepSupervisedModel):
     def _get_or_build_dataset(self, dataset, X, y):
         assert (X and y) or dataset
         if dataset:
+            self.idx2labels = dataset.idx2labels
             return dataset
-        d = InMemoryDataset(X, y)
-        return ClassifyDataset(
-            d, vocab=self._vocab, label2idx=self._label2idx,
+        dataset = ClassifyDataset(
+            InMemoryDataset(X, y),
+            vocab=self._vocab, label2idx=self._label2idx,
             segmenter=self._cut, max_length=self._max_length
         )
+        self.idx2labels = dataset.idx2labels
+        return dataset
 
-    def _decode(self, x, threshold):
+    def _valid_log(self, valid_dataset):
+        score = self.score(dataset=valid_dataset)
+        logger.info(self.format_f_score(score))
+        return score
+
+    def format_f_score(self, score):
+        score_strings = []
+        for key in score:
+            format_string = '%s(%d) %.2f(%.2f, %.2f)'
+            if key != 'avg' and score[key][-1] > 0:
+                score_strings.append(
+                    format_string % (
+                        key, score[key][3],
+                        score[key][2] * 100,  # F score
+                        score[key][0] * 100,  # precision
+                        score[key][1] * 100  # recall
+                    )
+                )
+        score_strings.append(
+            'avg %.2f(%.2f, %.2f)' % (
+                score['avg'][2] * 100,  # F score
+                score['avg'][0] * 100,  # precision
+                score['avg'][1] * 100  # recall
+            )
+        )
+        return '\n'.join(score_strings)
+
+    def _decode(self, logits, threshold):
         threshold = np.array([
             threshold.get(l, 0.5)
             for l in self.idx2labels(range(self._num_classes))
         ])
-        return _decode(
-            x, threshold, is_binary=self._num_classes == 2,
-            is_multilabel=self._is_multilabel
-        )
-
-    def _debinarize(self, binarized_label):
-        l = [
-            [i for i, t in enumerate(bl) if t == 1] for bl in binarized_label
-        ]
-        if self._is_multilabel:
-            return l
-        return list(itertools.chain(*l))
-
-    def _decode_label(self, idx):
-        if isinstance(idx[0], list):
-            return [self.idx2labels(i) for i in idx]
-        return self.idx2labels(idx)
-
-    def _valid_log(self, valid_dataset):
-        s = self.score(dataset=valid_dataset)
-        if self._is_multilabel or self._num_classes > 2:
-            scores, avg_score = s
-            for l, p, r, f, _ in zip(self.idx2labels(
-                    list(range(self._num_classes))), *scores):
-                logger.info(f'label: {l} precision: {p}, '
-                            f'recall: {r}, f1: {f}')
-            p, r, f, _ = avg_score
-            logger.info(f'avg: {round(f * 100, 2)}({round(p * 100, 2)}, '
-                        f'{round(r * 100, 2)})')
-            return f
-        else:
-            p, r, f, _ = scores
-            logger.info(f'precision: {p}, recall: {r}, f1: {f}')
-            return f
+        return logits2classes(logits, self._is_multilabel, threshold=threshold)
 
     def _calculate_logits(self, inputs, mask, *args):
         return self.encode_layer(self.embedding_layer(inputs), mask)
@@ -157,58 +140,44 @@ class DeepClassifier(DeepSupervisedModel):
         vocab = self._vocab
         return functools.partial(batchify, vocab[vocab.padding_token])
 
-    def predict(
-        self, X=None, dataset=None, batch_size=512,
-        threshold=None, return_origin_label=True
-    ):
+    def predict(self, X=None, dataset=None, threshold=None, batch_size=512):
         assert self._trained
         assert dataset or X
-        if threshold is None:
-            threshold = self._threshold
+        _threshold = threshold or dict()
 
         if dataset is None:
             dataset = self._get_or_build_dataset(dataset, X, ['O'] * len(X))
-        self.idx2labels = dataset.idx2labels
         dataloader = self._build_dataloader(dataset, batch_size, False, 'keep')
 
         predictions = []
         for one_batch in dataloader:
             logits = self._forward(self._calculate_logits, one_batch)
-            predictions.extend(self._decode(logits.asnumpy(), threshold))
+            predictions.extend(self._decode(logits.asnumpy(), _threshold))
         dataloader.reset()
-        if return_origin_label:
-            if self._is_multilabel:
-                predictions = self._debinarize(predictions)
-            return self._decode_label(predictions)
-        return predictions
+        if self._is_multilabel:
+            return [self.idx2labels(p) for p in predictions]
+        return self.idx2labels(predictions)
 
-    def score(self, X=None, y=None, dataset=None, batch_size=64):
+    def score(
+        self, X=None, y=None, dataset=None, threshold=None, batch_size=512
+    ):
         assert self._trained
+        assert dataset or X
+
         dataset = self._get_or_build_dataset(dataset, X, y)
         predictions = self.predict(
-            dataset=dataset,
-            batch_size=batch_size,
-            return_origin_label=False
+            dataset=dataset, threshold=threshold, batch_size=batch_size
         )
-        y = [label for _, label in dataset]
-        if not self._is_multilabel:
-            y = [np.argmax(label) for label in y]
-        y = np.vstack(y)
-        predictions = np.vstack(predictions)
-        if self._num_classes == 2 and not self._is_multilabel:
-            binary_score = precision_recall_fscore_support(
-                y, predictions, average='binary'
-            )
-            return binary_score
+        if self._is_multilabel:
+            _y = np.vstack([l for _, l in dataset])
+            _predictions = dataset._binarizer.transform(predictions)
         else:
-            detail_score = precision_recall_fscore_support(
-                y, predictions, labels=list(range(self._num_classes))
-            )
-            micro_score = precision_recall_fscore_support(
-                y, predictions,
-                labels=list(range(self._num_classes)), average='micro'
-            )
-            return detail_score, micro_score
+            _y = y
+            _predictions = predictions
+        return classify_f_score(
+            _y, _predictions, self._is_multilabel,
+            labels=self.idx2labels(range(self._num_classes))
+        )
 
     def save(self, file_path: str) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -241,8 +210,7 @@ class DeepClassifier(DeepSupervisedModel):
             vocab=embedding_layer._vocab,
             is_multilabel=meta['is_multilabel'],
             label2idx=meta['label2idx'], segmenter=meta['segmenter'],
-            max_length=meta['max_length'], embed_size=meta['embed_size'],
-            threshold=meta['threshold'], ctx=ctx
+            max_length=meta['max_length'], embed_size=meta['embed_size'], ctx=ctx
         )
         ins._trained = True
         ins._build(ctx, initialize=False)
@@ -291,7 +259,7 @@ class TextCNNClassifier(DeepClassifier):
     def __init__(
         self, num_classes, encode_layer=None, embedding_layer=None,
         vocab=None, is_multilabel=False, label2idx=None, segmenter='jieba',
-        max_length=100, embed_size=100, threshold=None,
+        max_length=100, embed_size=100,
         num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
         conv_layer_activation='tanh', num_highway=1, dropout=0,
         num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
@@ -313,9 +281,8 @@ class TextCNNClassifier(DeepClassifier):
         super().__init__(
             num_classes, encode_layer, embedding_layer=embedding_layer,
             is_multilabel=is_multilabel, label2idx=label2idx,
-            vocab=vocab, segmenter=segmenter,
-            max_length=max_length, embed_size=embed_size,
-            threshold=threshold, ctx=ctx, **kwargs
+            vocab=vocab, segmenter=segmenter, max_length=max_length,
+            embed_size=embed_size, ctx=ctx, **kwargs
         )
         self.meta.update({
             'num_filters': list(num_filters),
@@ -341,7 +308,7 @@ class TextRNNClassifier(DeepClassifier):
     def __init__(
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
-        max_length=100, embed_size=100, threshold=None,
+        max_length=100, embed_size=100,
         num_rnn_layers=1, projection_size=128, hidden_size=1024,
         cell_clip=3, projection_clip=3, dropout=0.5, dense_connection='last',
         num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
@@ -365,9 +332,8 @@ class TextRNNClassifier(DeepClassifier):
         super().__init__(
             num_classes, encode_layer, embedding_layer=embedding_layer,
             is_multilabel=is_multilabel, label2idx=label2idx,
-            vocab=vocab, segmenter=segmenter,
-            max_length=max_length, embed_size=embed_size,
-            threshold=threshold, ctx=ctx, **kwargs
+            vocab=vocab, segmenter=segmenter, max_length=max_length,
+            embed_size=embed_size, ctx=ctx, **kwargs
         )
         self.meta.update({
             'num_rnn_layers': num_rnn_layers,
@@ -389,7 +355,7 @@ class TextRCNNClassifier(DeepClassifier):
     def __init__(
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
-        max_length=100, embed_size=100, threshold=None,
+        max_length=100, embed_size=100,
         num_rnn_layers=1, projection_size=128, hidden_size=1024,
         cell_clip=3, projection_clip=3, dropout=0.5, kmax=2,
         num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
@@ -413,9 +379,8 @@ class TextRCNNClassifier(DeepClassifier):
         super().__init__(
             num_classes, encode_layer, embedding_layer=embedding_layer,
             is_multilabel=is_multilabel, label2idx=label2idx,
-            vocab=vocab, segmenter=segmenter,
-            max_length=max_length, embed_size=embed_size,
-            threshold=threshold, ctx=ctx, **kwargs
+            vocab=vocab, segmenter=segmenter, max_length=max_length,
+            embed_size=embed_size, ctx=ctx, **kwargs
         )
         self.meta.update({
             'num_rnn_layers': num_rnn_layers,
@@ -437,7 +402,7 @@ class TextTransformerClassifier(DeepClassifier):
     def __init__(
         self, num_classes, encode_layer=None, embedding_layer=None,
         is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
-        max_length=100, embed_size=100, threshold=None,
+        max_length=100, embed_size=100,
         attention_cell='multi_head', num_layers=2,
         units=512, hidden_size=2048,
         num_heads=4, scaled=True, dropout=0.0,
@@ -478,9 +443,8 @@ class TextTransformerClassifier(DeepClassifier):
         super().__init__(
             num_classes, encode_layer, embedding_layer=embedding_layer,
             is_multilabel=is_multilabel, label2idx=label2idx,
-            vocab=vocab, segmenter=segmenter,
-            max_length=max_length, embed_size=embed_size,
-            threshold=threshold, ctx=ctx, **kwargs
+            vocab=vocab, segmenter=segmenter, max_length=max_length,
+            embed_size=embed_size, ctx=ctx, **kwargs
         )
         self.meta.update({
             'attention_cell': attention_cell,

@@ -270,8 +270,6 @@ class DeepSupervisedModel(BaseModel):
         self._prefetch = prefetch
         train_dataset = self._get_or_build_dataset(train_dataset, X, y)
 
-        self.idx2labels = train_dataset.idx2labels
-        self.idx2tokens = train_dataset.idx2tokens
         if self._vocab is None:
             self._vocab = train_dataset._vocab
         if self._label2idx is None:

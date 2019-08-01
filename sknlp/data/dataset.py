@@ -1,6 +1,6 @@
 import collections
 import os
-from typing import Dict, List, Tuple, Sequence, Optional, Callable, Union
+from typing import Dict, List, Tuple, Sequence, Optional, Callable
 
 from mxnet.gluon.data.dataset import Dataset
 
@@ -106,15 +106,15 @@ class NLPDataset:
     def _split_row(self, row: str) -> List[str]:
         return row.split('\t')
 
-    def _preprocess_text(self, text: str) -> List[int]:
+    def preprocess_text(self, text: str) -> List[int]:
         return self._vocab[self._segmenter(text[:self._max_length])]
 
-    def _preprocess_func(self, text: str, *args) -> List[int]:
-        processed_text = self._preprocess_text(text)
+    def preprocess_func(self, text: str, *args) -> List[int]:
+        processed_text = self.preprocess_text(text)
         return processed_text
 
     def __getitem__(self, idx: int) -> List[int]:
-        return self._preprocess_func(*self._split_row(self._dataset[idx]))
+        return self.preprocess_func(*self._split_row(self._dataset[idx]))
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -180,18 +180,18 @@ class SupervisedNLPDataset(NLPDataset):
     def idx2tokens(self, idx_list: List[int]) -> List[str]:
         return self._vocab.to_tokens(idx_list)
 
-    def _preprocess_label(self, label: str) -> List[int]:
+    def preprocess_label(self, label: str) -> List[int]:
         return [self._label2idx[l] for l in label.split('|')]
 
-    def _preprocess_func(
+    def preprocess_func(
         self, text: str, label: str, *args
     ) -> Tuple[List[int], List[int]]:
-        processed_text = self._preprocess_text(text)
-        processed_label = self._preprocess_label(label)
+        processed_text = self.preprocess_text(text)
+        processed_label = self.preprocess_label(label)
         return processed_text, processed_label
 
     def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
-        return self._preprocess_func(*self._split_row(self._dataset[idx]))
+        return self.preprocess_func(*self._split_row(self._dataset[idx]))
 
 
 class ClassifyDataset(SupervisedNLPDataset):
@@ -202,16 +202,17 @@ class ClassifyDataset(SupervisedNLPDataset):
         vocab: Optional[Vocab] = None,
         label2idx: Optional[Dict[str, int]] = None,
         segmenter: Optional[Callable[[str], List[str]]] = None,
-        max_length: Optional[int] = 100, **kwargs
+        max_length: Optional[int] = 100
     ) -> None:
         super().__init__(
-            dataset, vocab=vocab, label2idx=label2idx, segmenter=segmenter,
-            max_length=max_length, **kwargs
+            dataset, vocab=vocab, label2idx=label2idx,
+            segmenter=segmenter, max_length=max_length
         )
         self._binarizer = MultiLabelBinarizer([
-            self._idx2label[i] for i in range(len(self._label2idx))])
+            self._idx2label[i] for i in range(len(self._label2idx))
+        ])
 
-    def _preprocess_label(self, label: str) -> List[int]:
+    def preprocess_label(self, label: str) -> List[int]:
         return self._binarizer.fit_transform([label.split('|')])[0].tolist()
 
     def idx2labels(self, idx_list: List[int]) -> List[str]:
@@ -220,7 +221,7 @@ class ClassifyDataset(SupervisedNLPDataset):
 
 class SequenceTagDataset(SupervisedNLPDataset):
 
-    def _preprocess_label(self, label: str) -> List[int]:
+    def preprocess_label(self, label: str) -> List[int]:
         return [
             self._label2idx[l] for l in label.split('|')[:self._max_length]
         ]
@@ -311,7 +312,7 @@ DATASET_DIR = 'datasets'
 #                          segmenter=segmenter,
 #                          max_length=max_length)
 
-#     def _preprocess_label(self, label):
+#     def preprocess_label(self, label):
 #         if label == 'nonsense':
 #             label = ''
 #         return self._binarizer.fit_transform([label.split('|')])[0]

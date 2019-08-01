@@ -1,7 +1,8 @@
+from typing import Tuple
+
 import numpy as np
 import gluonnlp
 from gensim.models import KeyedVectors
-from typing import Tuple
 
 
 class Vocab(gluonnlp.Vocab):
