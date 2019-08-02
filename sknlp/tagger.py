@@ -12,15 +12,14 @@ from mxnet.gluon import nn
 
 import gluonnlp
 
-from .base import DeepSupervisedModel
+from .base import DeepSupervisedModel, Container
 from .data import Pad, InMemoryDataset, SequenceTagDataset
 from .utils.array import sequence_mask
 
 from .embedding import Token2vec
 from .crf import Crf, viterbi_decode
 from .encode import TextRNN
-
-from .metric.f_score import ner_f_score
+from .metric import ner_f_score
 
 
 logger = logging.getLogger(__name__)
@@ -70,13 +69,15 @@ class DeepTagger(DeepSupervisedModel):
         self.loss = Crf(self._num_classes, prefix='crf_')
         self.meta['crf_prefix'] = self.loss.prefix
         self._trainable = {
-            'embedding': self.embedding_layer,
+            'embedding': self.embedding_layer.model,
             'encode': self.encode_layer,
             'loss': self.loss
         }
+        self.model = Container(self.embedding_layer.model,  self.encode_layer)
         if initialize:
-            self.embedding_layer._build(ctx, initialize=initialize)
-            self.encode_layer.initialize(init=mx.init.Xavier(), ctx=ctx)
+            # self.embedding_layer._build(ctx, initialize=initialize)
+            # self.encode_layer.initialize(init=mx.init.Xavier(), ctx=ctx)
+            self.model.initialize(init=mx.init.Xavier(), ctx=ctx)
             self.loss.initialize(init=mx.init.Xavier(), ctx=ctx)
         self.encode_layer.hybridize(static_alloc=True)
         self.loss.hybridize(static_alloc=True)
@@ -104,8 +105,8 @@ class DeepTagger(DeepSupervisedModel):
             )
         return scores
 
-    def _calculate_logits(self, inputs, mask, *args):
-        return self.encode_layer(self.embedding_layer(inputs), mask)
+    def _calculate_logits(self, input, mask, *args):
+        return self.model(input, mask)
 
     def _calculate_loss(self, inputs, mask, labels):
         logits = self._calculate_logits(inputs, mask)

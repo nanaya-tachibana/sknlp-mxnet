@@ -14,6 +14,18 @@ from .data.dataloader import PrefetchDataLoader, DataLoader
 logger = logging.getLogger(__name__)
 
 
+class Container(mx.gluon.nn.HybridBlock):
+
+    def __init__(self, embedding_layer, encode_layer, *args, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.embedding_layer = embedding_layer
+            self.encode_layer = encode_layer
+
+    def hybrid_forward(self, F, input, mask):
+        return self.encode_layer(self.embedding_layer(input), mask)
+
+
 class BaseModel:
 
     def __init__(self, ctx=mx.cpu()):

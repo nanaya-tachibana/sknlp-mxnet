@@ -11,7 +11,7 @@ from mxnet.gluon import nn
 import gluonnlp
 import numpy as np
 
-from ..base import DeepSupervisedModel
+from ..base import DeepSupervisedModel, Container
 from ..data import ClassifyDataset, InMemoryDataset
 from ..data.batchify import Pad, Stack
 from ..utils.array import sequence_mask
@@ -19,7 +19,6 @@ from ..embedding import Token2vec
 from ..encode import TextCNN, TextRCNN, TextRNN, TextTransformer
 from ..segmenter import Segmenter
 from ..metric import classify_f_score
-
 from .utils import logits2classes
 
 logger = logging.getLogger(__name__)
@@ -68,16 +67,19 @@ class DeepClassifier(DeepSupervisedModel):
                 self._vocab, self._embed_size, loss=None
             )
         self._trainable = {
-            'embedding': self.embedding_layer,
+            'embedding': self.embedding_layer.model,
             'encode': self.encode_layer
         }
         if self._is_multilabel:
             self.loss = mx.gluon.loss.SigmoidBCELoss()
         else:
             self.loss = mx.gluon.loss.SoftmaxCELoss(sparse_label=False)
+
+        self.model = Container(self.embedding_layer.model,  self.encode_layer)
         if initialize:
-            self.embedding_layer._build(ctx, initialize=initialize)
-            self.encode_layer.initialize(init=mx.init.Xavier(), ctx=ctx)
+            # self.embedding_layer._build(ctx, initialize=initialize)
+            # self.encode_layer.initialize(init=mx.init.Xavier(), ctx=ctx)
+            self.model.initialize(init=mx.init.Xavier(), ctx=ctx)
             self.loss.initialize(init=mx.init.Xavier(), ctx=ctx)
         self.encode_layer.hybridize(static_alloc=True)
         self.loss.hybridize(static_alloc=True)
@@ -129,8 +131,9 @@ class DeepClassifier(DeepSupervisedModel):
         ])
         return logits2classes(logits, self._is_multilabel, threshold=threshold)
 
-    def _calculate_logits(self, inputs, mask, *args):
-        return self.encode_layer(self.embedding_layer(inputs), mask)
+    def _calculate_logits(self, input, mask, *args):
+        # return self.encode_layer(self.embedding_layer(inputs), mask)
+        return self.model(input, mask)
 
     def _calculate_loss(self, inputs, mask, labels):
         logits = self._calculate_logits(inputs, mask)
