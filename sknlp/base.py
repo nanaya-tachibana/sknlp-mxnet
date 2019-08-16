@@ -14,18 +14,6 @@ from .data.dataloader import PrefetchDataLoader, DataLoader
 logger = logging.getLogger(__name__)
 
 
-class Container(mx.gluon.nn.HybridBlock):
-
-    def __init__(self, embedding_layer, encode_layer, *args, **kwargs):
-        super().__init__(**kwargs)
-        with self.name_scope():
-            self.embedding_layer = embedding_layer
-            self.encode_layer = encode_layer
-
-    def hybrid_forward(self, F, input, mask):
-        return self.encode_layer(self.embedding_layer(input), mask)
-
-
 class BaseModel:
 
     def __init__(self, ctx=mx.cpu()):
@@ -140,9 +128,9 @@ class BaseModel:
         return loss.sum().asscalar()
 
     def _before_epoch(self, *arg, **kwargs):
-        trainer = kwargs['trainer']
-        lr = trainer.learning_rate
-        if kwargs['update_lr']:
+        if 'update_lr' in kwargs and kwargs['update_lr']:
+            trainer = kwargs['trainer']
+            lr = trainer.learning_rate
             new_lr = lr * kwargs['lr_update_factor']
             trainer.set_learning_rate(new_lr)
             logger.info('Change learning rate to %e' % new_lr)
@@ -209,7 +197,7 @@ class BaseModel:
         batch_sampler = BatchSampler(
             dataset, batch_size,
             sampler='random' if shuffle else 'sequential',
-            last_batch=last_batch, _batchify_fn=self._batchify_fn()
+            last_batch=last_batch, batchify_fn=self._batchify_fn()
         )
         if self._prefetch > 0:
             return PrefetchDataLoader(batch_sampler, batch_size)
