@@ -158,7 +158,7 @@ class DeepTagger(DeepSupervisedModel):
             self.loss.export(os.path.join(temp_dir, 'crf_loss'))
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
-            shutil.make_archive(file_path, 'gztar', temp_dir)
+            shutil.make_archive(file_path, 'tar', temp_dir)
 
     @classmethod
     def _load_embedding_layer(cls, file_path, update, ctx):
@@ -167,12 +167,12 @@ class DeepTagger(DeepSupervisedModel):
     @classmethod
     def load(cls, file_path, update=False, ctx=mx.cpu()):
         with tempfile.TemporaryDirectory() as temp_dir:
-            shutil.unpack_archive(file_path, temp_dir, 'gztar')
+            shutil.unpack_archive(file_path, temp_dir, 'tar')
             with open(os.path.join(temp_dir, 'meta.json')) as f:
                 meta = json.loads(f.read())
 
             embedding_layer = cls._load_embedding_layer(
-                os.path.join(temp_dir, 'embedding.tar.gz'), update, ctx
+                os.path.join(temp_dir, 'embedding.tar'), update, ctx
             )
             encode_layer = nn.SymbolBlock.imports(
                 os.path.join(temp_dir, 'encode-symbol.json'), ['data0', 'data1'],

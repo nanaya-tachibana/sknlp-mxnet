@@ -173,8 +173,8 @@ class Token2vec(BaseModel):
         self, train_dataset=None, valid_dataset=None, batch_size=32,
         sequence_length=20, last_batch='keep', n_epochs=15, optimizer='adam',
         lr: float = 1e-3, lr_update_factor: float = 0.9,
-        lr_update_steps: int = 1000, clip: float = 1.0, checkpoint=None,
-        save_frequency=1, prefetch=0
+        lr_update_epochs: int = 5, clip: float = 1.0, checkpoint=None,
+        save_frequency=1, prefetch=0, multigpu=False,
     ):
         """
         Fit model.
@@ -213,8 +213,9 @@ class Token2vec(BaseModel):
         self._fit(
             dataloader, valid_dataset, lr=lr, n_epochs=n_epochs,
             optimizer=optimizer, lr_update_factor=lr_update_factor,
-            lr_update_steps=lr_update_steps, clip=clip, checkpoint=checkpoint,
-            save_frequency=save_frequency
+            lr_update_epochs=lr_update_epochs, clip=clip,
+            checkpoint=checkpoint, save_frequency=save_frequency,
+            multigpu=multigpu
         )
 
     def _batch_loss(self, loss, *args):
@@ -243,12 +244,12 @@ class Token2vec(BaseModel):
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
             self.model.export(os.path.join(temp_dir, 'embedding'))
-            shutil.make_archive(file_path, 'gztar', temp_dir)
+            shutil.make_archive(file_path, 'tar', temp_dir)
 
     @classmethod
     def _load(cls, file_path, ctx):
         with tempfile.TemporaryDirectory() as temp_dir:
-            shutil.unpack_archive(file_path, temp_dir, 'gztar')
+            shutil.unpack_archive(file_path, temp_dir, 'tar')
             with open(os.path.join(temp_dir, 'meta.json')) as f:
                 meta = json.loads(f.read())
             model = nn.SymbolBlock.imports(
@@ -342,17 +343,13 @@ class Token2vecElmo(Token2vec):
     ):
         return self.model.valid(input, states, mask, forward_labels)
 
-    def _forward(self, func, one_batch, ctx, batch_axis=1):
-        res = []
-        for one_part in zip(self._states_list, *[
-            mx.gluon.utils.split_and_load(
-                element, ctx, batch_axis=batch_axis
-            ) for element in one_batch
-        ]):
-            res.append(func(*one_part))
-        return res
+    def _forward(self, func, one_batch):
+        ctx = self._ctx
+        return func(
+            self.states, *[mx.nd.array(element, ctx) for element in one_batch]
+        )
 
-    def _forward_backward(self, one_batch, ctx, grad=True):
+    def _forward_backward(self, one_batch, grad=True):
         with mx.autograd.record():
             loss, states = self._forward(self._calculate_loss, one_batch)
             self.states = _detach(states)
