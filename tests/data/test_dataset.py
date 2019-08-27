@@ -76,8 +76,12 @@ class TestNLPDataset(TestDataset):
         nlp_dataset = self.dataset_cls(self.dataset, max_length=2)
         assert nlp_dataset[0] == [5, 7]
 
+    def test_text_length(self):
+        nlp_dataset = self.dataset_cls(self.dataset)
+        assert nlp_dataset.text_lengths == [3, 3, 3]
 
-class TestSupervisedNLPDataset(TestDataset):
+
+class TestSupervisedNLPDataset(TestNLPDataset):
 
     dataset = InMemoryDataset(
         ['大叫好', '大家好', '好厉害'],
@@ -111,13 +115,30 @@ class TestSupervisedNLPDataset(TestDataset):
 
 class TestClassifyDataset(TestSupervisedNLPDataset):
 
+    dataset_cls = ClassifyDataset
+
     def test_dataset(self, tmp_path):
-        c_dataset = ClassifyDataset(self.dataset)
-        assert c_dataset[0] == ([5, 7, 4], [1, 1, 0])
-        assert c_dataset.idx2labels([0, 8]) == ['1']
+        dataset = self.dataset_cls(self.dataset)
+        assert dataset[0] == ([5, 7, 4], [1, 1, 0])
+        assert dataset.idx2labels([0, 8]) == ['1']
+
+    def test_custom_settings(self):
+        dataset = self.dataset_cls(
+            self.dataset,
+            vocab=Vocab({
+                '大': 102, '叫': 101, '好': 100,
+                '家': 1, '厉': 1, '害': 1
+            }),
+            label2idx={'1': 2, '2': 0, '3': 1}
+        )
+        assert dataset[0] == ([4, 5, 6], [1, 0, 1])
+
+    def test_max_length(self):
+        dataset = self.dataset_cls(self.dataset, max_length=2)
+        assert dataset[0] == ([5, 7], [1, 1, 0])
 
 
-class TestSequenceTagDataset(TestDataset):
+class TestSequenceTagDataset(TestSupervisedNLPDataset):
 
     dataset = InMemoryDataset(
         ['大叫好', '大家好', '好厉害'],
@@ -126,7 +147,24 @@ class TestSequenceTagDataset(TestDataset):
         ['i1', 'i2', 'i3']
     )
 
+    dataset_cls = SequenceTagDataset
+
     def test_dataset(self, tmp_path):
-        s_dataset = SequenceTagDataset(self.dataset)
-        assert s_dataset[0] == ([5, 7, 4], [0, 1, 2])
-        assert s_dataset.idx2labels([0, 10]) == ['1', 'O']
+        dataset = self.dataset_cls(self.dataset)
+        assert dataset[0] == ([5, 7, 4], [0, 1, 2])
+        assert dataset.idx2labels([0, 10]) == ['1', 'O']
+
+    def test_custom_settings(self):
+        dataset = self.dataset_cls(
+            self.dataset,
+            vocab=Vocab({
+                '大': 102, '叫': 101, '好': 100,
+                '家': 1, '厉': 1, '害': 1
+            }),
+            label2idx={'1': 2, '2': 0, '3': 1, '4': 3, 'x': 4}
+        )
+        assert dataset[0] == ([4, 5, 6], [2, 0, 1])
+
+    def test_max_length(self):
+        dataset = self.dataset_cls(self.dataset, max_length=2)
+        assert dataset[0] == ([5, 7], [0, 1])
