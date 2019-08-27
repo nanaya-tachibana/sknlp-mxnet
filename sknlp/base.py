@@ -196,7 +196,7 @@ class BaseModel:
     ):
         batch_sampler = BatchSampler(
             dataset, batch_size,
-            sampler='random' if shuffle else 'sequential',
+            sampler='bucket' if shuffle else 'sequential',
             last_batch=last_batch, batchify_fn=self._batchify_fn()
         )
         if self._prefetch > 0:

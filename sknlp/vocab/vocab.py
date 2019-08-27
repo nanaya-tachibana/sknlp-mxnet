@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Tuple
 
 import numpy as np
@@ -9,29 +10,30 @@ class Vocab(gluonnlp.Vocab):
 
     @classmethod
     def from_word2vec_file(
-        cls, file_path: str, binary: bool = True
+            cls, file_path: str, binary: bool = True
     ) -> Tuple['Vocab', np.ndarray]:
         """
         从word2vec格式文件读取词汇表
 
         Parameters
         ----------
-        file_path: `str`
-            word2vec文件路径
-        binary: `bool`, optional(default=`True`)
-            word2vec文件是否以二进制存储
+        file_path: word2vec文件路径
+        binary: word2vec文件是否以二进制存储, default=True
 
         Returns
         ----------
-        vocab: `Vocab`
-            词汇表
-        embed: `numpy.array`, shape(vocab_size, embed_size)
-            embedding矩阵
+        vocab: 词汇表
+        embed: embedding矩阵, shape(vocab_size, embed_size)
         """
         embed = KeyedVectors.load_word2vec_format(file_path, binary=binary)
-        counter = gluonnlp.data.count_tokens(embed.vocab.keys())
-        vocab = cls(counter)
+        tokens = Counter(embed.vocab.keys())
+        vocab = cls(tokens)
         embed_weight = embed[vocab.idx_to_token[4:]]
+        d = embed_weight.shape[1]
         embed_weight = np.concatenate([
-            np.zeros((4, embed_weight.shape[1])), embed_weight], axis=0)
+            embed[['<unk>']] if '<unk>' in embed else np.zeros((1, d)),
+            embed[['<pad>']] if '<pad>' in embed else np.zeros((1, d)),
+            embed[['<bos>']] if '<bos>' in embed else np.zeros((1, d)),
+            embed[['<eos>']] if '<eos>' in embed else np.zeros((1, d)),
+            embed_weight], axis=0)
         return vocab, embed_weight

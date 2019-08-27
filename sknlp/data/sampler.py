@@ -1,19 +1,71 @@
+import itertools
+
 import numpy as np
-from mxnet.gluon.data.sampler import RandomSampler, SequentialSampler
+from gluonnlp.data.sampler import SplitSampler as RandomSampler
+from gluonnlp.data.sampler import FixedBucketSampler
+
+
+class SequentialSampler(RandomSampler):
+
+    def __iter__(self):
+        return iter(range(self._start, self._end))
+
+
+class BucketSampler(FixedBucketSampler):
+
+    def __init__(
+        self, lengths, batch_size, num_buckets=10, shuffle=True,
+        num_parts=1, part_index=0
+    ):
+        super().__init__(
+            lengths, batch_size, num_buckets=num_buckets, shuffle=shuffle,
+            num_shards=0 if num_parts == 1 else num_parts
+        )
+        self._part_index = part_index
+
+    def __iter__(self):
+        if self._shuffle:
+            np.random.shuffle(self._batch_infos)
+            for bucket_id in range(len(self._bucket_keys)):
+                np.random.shuffle(self._bucket_sample_ids[bucket_id])
+
+        if self._num_shards > 0:
+            num_batches = len(self._batch_infos)
+            for batch_idx in range(0, num_batches, self._num_shards):
+                if batch_idx + self._part_index >= len(self._batch_infos):
+                    return
+                batch_info = self._batch_infos[batch_idx + self._part_index]
+                bucket_id, batch_begin = batch_info
+                batch_size = self._bucket_batch_sizes[bucket_id]
+                batch_end = min(
+                    batch_begin + batch_size,
+                    len(self._bucket_sample_ids[bucket_id])
+                )
+                yield self._bucket_sample_ids[bucket_id][batch_begin:batch_end]
+        else:
+            for bucket_id, batch_begin in self._batch_infos:
+                batch_size = self._bucket_batch_sizes[bucket_id]
+                batch_end = min(
+                    batch_begin + batch_size,
+                    len(self._bucket_sample_ids[bucket_id])
+                )
+                yield self._bucket_sample_ids[bucket_id][batch_begin:batch_end]
 
 
 class BatchSampler:
 
     def __init__(
-        self, dataset, batch_size, batch_axis=1,
-        sampler='random', last_batch='keep', _batchify_fn=None
+        self, dataset, batch_size, batch_axis=1, sampler='random',
+        last_batch='keep', batchify_fn=None, num_parts=1, part_index=0,
     ):
         self._dataset = dataset
         self._batch_size = batch_size
         self._batch_axis = batch_axis
-        self._sampler = self._get_sampler(sampler)(len(self._dataset))
+        self._num_parts = num_parts
+        self._part_index = part_index
+        self._sampler = self._get_sampler(sampler)
         self._last_batch = last_batch
-        self._batchify_fn = _batchify_fn
+        self._batchify_fn = batchify_fn
         self._prev = []
 
     def _get_sampler(self, sampler):
@@ -21,16 +73,37 @@ class BatchSampler:
             sampler, str
         ), 'Expected sampler to be a str, but got %s' % type(sampler)
         if sampler == 'random':
-            return RandomSampler
+            return RandomSampler(
+                len(self._dataset),
+                num_parts=self._num_parts, part_index=self._part_index
+            )
         if sampler == 'sequential':
-            return SequentialSampler
+            return SequentialSampler(
+                len(self._dataset),
+                num_parts=self._num_parts, part_index=self._part_index
+            )
+        if sampler == 'bucket':
+            assert hasattr(
+                self._dataset, 'text_lengths',
+            ), 'When use bucket sampler, dataset must have '
+            'text_lengths property which returns a list of lengths of samples.'
+            return BucketSampler(
+                self._dataset.text_lengths, self._batch_size,
+                num_parts=self._num_parts, part_index=self._part_index
+            )
         raise ValueError(
             'sampler must be either "random" or "sequential", but got %s' %
             (sampler)
         )
 
     def __iter__(self):
-        corpus = (self._dataset[idx] for idx in self._sampler)
+        if isinstance(self._sampler, BucketSampler):
+            corpus = itertools.chain.from_iterable(
+                (self._dataset[idx] for idx in batch_idx)
+                for batch_idx in self._sampler
+            )
+        else:
+            corpus = (self._dataset[idx] for idx in self._sampler)
         batch, self._prev = self._prev, []
         for i in corpus:
             batch.append(i)
@@ -56,16 +129,26 @@ class BatchSampler:
                     "'discard', or 'rollover', but got %s" % self._last_batch
                 )
 
+    @property
+    def batch_size(self):
+        return self._batch_size
+
+    @property
+    def batch_axis(self):
+        return self._batch_axis
+
 
 class BPTTBatchSampler(BatchSampler):
 
     def __init__(
         self, dataset, batch_size, seq_len,
         bos_token, eos_token, padding_token,
-        sampler='random', last_batch='keep'
+        sampler='random', last_batch='keep',
+        num_parts=1, part_index=0
     ):
         super().__init__(
-            dataset, batch_size, sampler=sampler, last_batch=last_batch
+            dataset, batch_size, sampler=sampler, last_batch=last_batch,
+            num_parts=num_parts, part_index=part_index
         )
         self._seq_len = seq_len
         self._bos_token = bos_token

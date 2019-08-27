@@ -1,4 +1,4 @@
-import collections
+from collections import Counter
 import os
 from typing import Dict, List, Tuple, Sequence, Optional, Callable
 
@@ -89,19 +89,25 @@ class NLPDataset:
         self._max_length = max_length
 
         n_samples = len(dataset)
-        token_counter = collections.Counter()
-        self._lengths = []
+        token_counter = Counter()
+        self._text_lengths: List[int] = []
         for i in range(n_samples):
             row = dataset[i]
             text = self._split_row(row)[0]
             if vocab is None:
                 words = self._segmenter(text)
-                self._lengths.append(len(words))
+                self._text_lengths.append(len(words))
                 token_counter.update(words)
         if vocab is None:
             self._vocab = Vocab(token_counter)
         else:
             self._vocab = vocab
+
+    @property
+    def text_lengths(self) -> List[int]:
+        if len(self._text_lengths) != len(self):
+            self._text_lengths = [len(words) for words in self]
+        return self._text_lengths
 
     def _split_row(self, row: str) -> List[str]:
         return row.split('\t')
@@ -112,6 +118,10 @@ class NLPDataset:
     def preprocess_func(self, text: str, *args) -> List[int]:
         processed_text = self.preprocess_text(text)
         return processed_text
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
 
     def __getitem__(self, idx: int) -> List[int]:
         return self.preprocess_func(*self._split_row(self._dataset[idx]))
@@ -154,13 +164,16 @@ class SupervisedNLPDataset(NLPDataset):
         self._max_length = max_length
 
         n_samples = len(dataset)
-        token_counter = collections.Counter()
-        label_counter = collections.Counter()
+        token_counter = Counter()
+        label_counter = Counter()
+        self._text_lengths: List[int] = []
         for i in range(n_samples):
             row = dataset[i]
             text, label = self._split_row(row)[:2]
             if vocab is None:
-                token_counter.update(self._segmenter(text))
+                words = self._segmenter(text)
+                self._text_lengths.append(len(words))
+                token_counter.update(words)
             if label2idx is None:
                 labels = label.split('|')
                 label_counter.update(labels)
@@ -176,6 +189,12 @@ class SupervisedNLPDataset(NLPDataset):
         else:
             self._label2idx = label2idx
         self._idx2label = {v: k for k, v in self._label2idx.items()}
+
+    @property
+    def text_lengths(self) -> List[int]:
+        if len(self._text_lengths) != len(self):
+            self._text_lengths = [len(words) for words, label in self]
+        return self._text_lengths
 
     def idx2tokens(self, idx_list: List[int]) -> List[str]:
         return self._vocab.to_tokens(idx_list)
