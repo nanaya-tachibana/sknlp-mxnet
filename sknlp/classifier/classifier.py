@@ -18,7 +18,8 @@ from ..embedding import Token2vec
 from ..encode import TextCNN, TextRCNN, TextRNN, TextTransformer
 from ..segmenter import Segmenter
 from ..metric import classify_f_score
-from .utils import logits2classes
+from .utils import logits2classes, logits2scores, scores2classes
+
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +122,21 @@ class DeepClassifier(DeepSupervisedModel):
         )
         return '\n'.join(score_strings)
 
-    def _decode(self, logits, threshold):
+    def _decode(self, logits, threshold, return_score=False):
         threshold = np.array([
             threshold.get(l, 0.5)
             for l in self.idx2labels(range(self._num_classes))
         ])
+        if return_score:
+            scores = logits2scores(logits, self._is_multilabel)
+            classes = scores2classes(scores, self._is_multilabel, threshold)
+            class_scores = []
+            for i, c in enumerate(classes):
+                if isinstance(c, list):
+                    class_scores.append([scores[i, j] for j in c])
+                else:
+                    class_scores.append(scores[i, c])
+            return classes, class_scores
         return logits2classes(logits, self._is_multilabel, threshold=threshold)
 
     def _calculate_logits(self, input, mask, *args):
@@ -139,7 +150,10 @@ class DeepClassifier(DeepSupervisedModel):
         vocab = self._vocab
         return functools.partial(batchify, vocab[vocab.padding_token])
 
-    def predict(self, X=None, dataset=None, threshold=None, batch_size=512):
+    def predict(
+        self, X=None, dataset=None, threshold=None,
+        batch_size=512, return_score=False
+    ):
         assert self._trained
         assert dataset or X
         _threshold = threshold or dict()
@@ -151,11 +165,23 @@ class DeepClassifier(DeepSupervisedModel):
         predictions = []
         for one_batch in dataloader:
             logits = self._forward(self._calculate_logits, one_batch)
-            predictions.extend(self._decode(logits.asnumpy(), _threshold))
+            if not return_score:
+                predictions.extend(self._decode(logits.asnumpy(), _threshold))
+            else:
+                classes, scores = self._decode(
+                    logits.asnumpy(), _threshold, return_score=True
+                )
+                predictions.extend(classes)
         dataloader.reset()
+
         if self._is_multilabel:
-            return [self.idx2labels(p) for p in predictions]
-        return self.idx2labels(predictions)
+            orignal_labels = [self.idx2labels(p) for p in predictions]
+        else:
+            orignal_labels = self.idx2labels(predictions)
+        if return_score:
+            return orignal_labels, scores
+        else:
+            return orignal_labels
 
     def score(
         self, X=None, y=None, dataset=None, threshold=None, batch_size=512
