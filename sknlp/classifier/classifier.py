@@ -13,11 +13,13 @@ import numpy as np
 from ..base import DeepSupervisedModel
 from ..data import ClassifyDataset, InMemoryDataset
 from ..data.batchify import Pad, Stack
-from ..utils.array import sequence_mask
 from ..embedding import Token2vec
 from ..encode import TextCNN, TextRCNN, TextRNN, TextTransformer
 from ..segmenter import Segmenter
 from ..metric import classify_f_score
+from ..utils.array import sequence_mask
+from ..utils.file import make_tarball
+
 from .utils import logits2classes, logits2scores, scores2classes
 
 
@@ -210,7 +212,7 @@ class DeepClassifier(DeepSupervisedModel):
             self.encode_layer.export(os.path.join(temp_dir, 'encode'))
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
-            shutil.make_archive(file_path, 'tar', temp_dir)
+            make_tarball(file_path, temp_dir)
 
     @classmethod
     def _load_embedding_layer(cls, file_path, update, ctx):

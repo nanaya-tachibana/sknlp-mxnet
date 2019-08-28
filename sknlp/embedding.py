@@ -15,6 +15,7 @@ from .base import BaseModel
 from .vocab import Vocab
 from .module import BiLSTM
 from .loss import AdaptiveSoftmax, ElmoLoss
+from .utils.file import make_tarball
 
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,7 @@ class Token2vec(BaseModel):
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
             self.model.export(os.path.join(temp_dir, 'embedding'))
-            shutil.make_archive(file_path, 'tar', temp_dir)
+            make_tarball(file_path, temp_dir)
 
     @classmethod
     def _load(cls, file_path, ctx):

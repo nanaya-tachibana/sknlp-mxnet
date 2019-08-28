@@ -15,6 +15,7 @@ import gluonnlp
 from .base import DeepSupervisedModel
 from .data import Pad, InMemoryDataset, SequenceTagDataset
 from .utils.array import sequence_mask
+from .utils.file import make_tarball
 
 from .embedding import Token2vec
 from .crf import Crf, viterbi_decode
@@ -158,7 +159,7 @@ class DeepTagger(DeepSupervisedModel):
             self.loss.export(os.path.join(temp_dir, 'crf_loss'))
             with open(os.path.join(temp_dir, 'meta.json'), 'w') as f:
                 f.write(json.dumps(self.meta, ensure_ascii=False))
-            shutil.make_archive(file_path, 'tar', temp_dir)
+            make_tarball(file_path, temp_dir)
 
     @classmethod
     def _load_embedding_layer(cls, file_path, update, ctx):
