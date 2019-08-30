@@ -55,7 +55,7 @@ class DeepTagger(DeepSupervisedModel):
         self._vocab = vocab
 
         self.meta = {
-            'num_tags': self._num_classes,
+            'num_classes': self._num_classes,
             'label2idx': self._label2idx,
             'max_length': self._max_length,
             'segmenter': self._segmenter,
@@ -188,7 +188,7 @@ class DeepTagger(DeepSupervisedModel):
             )
 
             ins = cls(
-                meta['num_tags'], encode_layer,
+                meta['num_classes'], encode_layer,
                 embedding_layer=embedding_layer,
                 vocab=embedding_layer._vocab, label2idx=meta['label2idx'],
                 segmenter=meta['segmenter'], max_length=meta['max_length'],
