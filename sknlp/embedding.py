@@ -13,7 +13,7 @@ from .data.sampler import BPTTBatchSampler
 from .data.dataloader import PrefetchDataLoader
 from .base import BaseModel
 from .vocab import Vocab
-from .module import BiLSTM
+from .module import BiLSTM, ConvEncoder
 from .loss import AdaptiveSoftmax, ElmoLoss
 from .utils.file import make_tarball
 
@@ -59,32 +59,52 @@ class TokenEmbedding(Embedding):
 class Elmo(Embedding):
 
     def __init__(
-        self, vocab, embed_size, num_layers=2, projection_size=300,
-        hidden_size=512, dropout=0, skip_connection=True, cell_clip=3,
-        projection_clip=3, **kwargs
+        self, vocab, char_embed_size, word_embed_size,
+        num_filters=(25, 50, 75, 100, 125, 150),
+        ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
+        conv_layer_activation='relu',
+        max_chars_per_token=20,
+        num_layers=2, projection_size=300,
+        hidden_size=512, dropout=0, cell_clip=3, projection_clip=3, **kwargs
     ):
-        super().__init__(vocab, embed_size, **kwargs)
+        super().__init__(vocab, char_embed_size, **kwargs)
+        self._max_chars_per_token = max_chars_per_token
         with self.name_scope():
             self.weight = self.params.get(
-                'weight', shape=(len(vocab), embed_size),
+                'weight', shape=(len(vocab), char_embed_size),
                 init=mx.init.Uniform(1), grad_stype='row_sparse'
             )
-            self.bilm = BiLSTM(
-                num_layers, projection_size, input_size=embed_size,
-                hidden_size=hidden_size,
-                dropout=dropout, cell_clip=cell_clip, return_all_layers=True,
-                prefix='bilm_'
+            self.char_conv = ConvEncoder(
+                char_embed_size, word_embed_size,
+                num_filters=num_filters, ngram_filter_sizes=ngram_filter_sizes,
+                conv_layer_activation=conv_layer_activation, prefix='charconv_'
             )
-            self.softmaxce = mx.gluon.loss.SoftmaxCrossEntropyLoss()
+            self.bilm = BiLSTM(
+                num_layers, projection_size, input_size=word_embed_size,
+                hidden_size=hidden_size, dropout=dropout, cell_clip=cell_clip,
+                return_all_layers=True, prefix='bilm_'
+            )
 
     def hybrid_forward(self, F, input, states, mask, weight):
         """
-        input: shape(seq_length, batch_size)
+        input: shape(seq_length, batch_size, max_chars_per_token)
         """
-        embed = F.Embedding(
+        char_embed = F.Embedding(
             input, weight, len(self._vocab), self._embed_size, sparse_grad=True
         )
-        return self.bilm(embed, states, mask)
+        # (batch_size * seq_length, max_chars_per_token, embed_size)
+        char_embed = char_embed.reshape((-1, self._max_chars_per_token))
+        word_embed = self.char_conv(F.transpose(
+            char_embed, axes=(1, 0, 2)
+        ))
+        out_shape_ref = input.slice_axis(axis=-1, begin=0, end=1)
+        out_shape_ref = out_shape_ref.broadcast_axes(
+            axis=(2,), size=(self._output_size)
+        )
+        lstm_input = F.transpose(
+            word_embed.reshape_like(out_shape_ref), axes=(1, 0, 2)
+        )
+        return self.bilm(lstm_input, states, mask)
 
     def __call__(self, input, states=None, mask=None, **kwargs):
         if states is None:
@@ -97,28 +117,6 @@ class Elmo(Embedding):
             else:
                 states = self.bilm.begin_state(func=mx.symbol.zeros)
         return super().__call__(input, states, mask, **kwargs)
-
-    def valid(self, input, states, mask, labels):
-        if isinstance(input, mx.ndarray.NDArray):
-            F = mx.ndarray
-            weight = self.weight.data(input.context)
-        else:
-            F = mx.symbol
-            weight = self.weight.var()
-        embed = F.Embedding(
-            input, weight, len(self._vocab), self._embed_size, sparse_grad=True
-        )
-        input, states = self.bilm(embed, states, mask)
-        last_layer = F.squeeze(
-            F.slice_axis(input, begin=-1, end=None, axis=0), axis=0
-        )
-        forward_input, backward_input = F.split(last_layer, axis=-1, num_outputs=2)
-        logits = F.dot(
-            F.reshape(forward_input, shape=(-3, -1)), weight, transpose_b=True
-        )
-        labels = F.reshape(labels, shape=(-1, ))
-        mask = F.reshape(mask, shape=(-1, ))
-        return self.softmaxce(logits, labels) * mask, states
 
 
 class Token2vec(BaseModel):
@@ -288,28 +286,37 @@ class Token2vec(BaseModel):
 class Token2vecElmo(Token2vec):
 
     def __init__(
-        self, vocab, embed_size, num_layers=1, projection_size=512,
-        hidden_size=512, dropout=0, skip_connection=True, cell_clip=3,
+        self, vocab, char_embed_size, word_embed_size,
+        num_filters=(32, 32, 64, 64, 128, 128, 256),
+        ngram_filter_sizes=(1, 2, 3, 4, 5, 6, 7),
+        conv_layer_activation='relu',
+        max_chars_per_token=20, num_layers=1, projection_size=512,
+        hidden_size=512, dropout=0, cell_clip=3,
         projection_clip=3, loss: str = 'adaptive',
         cutoffs: Tuple[int] = (100, ), div_factor: int = 4,
         model=None, ctx=None, **kwargs
     ):
         model = Elmo(
-            vocab, embed_size, num_layers=num_layers,
+            vocab, char_embed_size, word_embed_size,
+            num_filters=num_filters,
+            ngram_filter_sizes=ngram_filter_sizes,
+            conv_layer_activation=conv_layer_activation,
+            max_chars_per_token=max_chars_per_token,
+            num_layers=num_layers,
             projection_size=projection_size,
             hidden_size=hidden_size, dropout=dropout,
-            skip_connection=skip_connection, cell_clip=cell_clip,
+            cell_clip=cell_clip,
             projection_clip=projection_clip, prefix='embed_'
         )
         super().__init__(
-            vocab, embed_size, loss=loss, cutoffs=cutoffs,
+            vocab, word_embed_size, loss=loss, cutoffs=cutoffs,
             div_factor=div_factor, model=model, ctx=ctx, **kwargs
         )
         if loss is None:
             self.loss = None
         else:
             loss_func = AdaptiveSoftmax(
-                embed_size, len(vocab),
+                word_embed_size, len(vocab),
                 cutoffs=cutoffs, div_factor=div_factor,
             )
             self.meta.update({
@@ -318,11 +325,16 @@ class Token2vecElmo(Token2vec):
             })
             self.loss = ElmoLoss(loss_func)
         self.meta.update({
+            'char_embed_size': char_embed_size,
+            'word_embed_size': word_embed_size,
+            'num_filters': num_filters,
+            'ngram_filter_sizes': ngram_filter_sizes,
+            'conv_layer_activation': conv_layer_activation,
+            'max_chars_per_token': max_chars_per_token,
             'num_layers': num_layers,
             'projection_size': projection_size,
             'hidden_size': hidden_size,
             'dropout': dropout,
-            'skip_connection': skip_connection,
             'cell_clip': cell_clip,
             'projection_clip': projection_clip
         })

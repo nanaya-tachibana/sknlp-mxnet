@@ -1,8 +1,6 @@
 from mxnet.gluon import nn, contrib
-
 from gluonnlp.model import ConvolutionalEncoder
-
-from .module import BiLSTMWithClip, BaseTransformerEncoder
+from .module import BiLSTM, ConvEncoder
 
 
 class _HybridConcurrent(contrib.nn.HybridConcurrent):
@@ -33,11 +31,11 @@ class FCLayer(nn.HybridBlock):
                     self.net.add(nn.Dense(
                         hidden_size, flatten=False, prefix=f'layer{i}_'
                     ))
-                    self.net.add(nn.BatchNorm(axis=-1))
                     if i != num_layers - 2:
                         self.net.add(nn.Activation('relu'))
                     else:
                         self.net.add(nn.Activation(activation))
+                    self.net.add(nn.BatchNorm(axis=-1))
 
     def hybrid_forward(self, F, input):
         return self.net(input)
@@ -94,7 +92,7 @@ class TextCNN(nn.HybridBlock):
     def __init__(
         self, embed_size=100,
         num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
-        conv_layer_activation='tanh', num_highway=1, dropout=0, output_size=1,
+        conv_layer_activation='relu', num_highways=1, dropout=0, output_size=1,
         num_fc_layers=2, fc_hidden_size=512, fc_activation='relu', **kwargs
     ):
         super().__init__(**kwargs)
@@ -104,10 +102,11 @@ class TextCNN(nn.HybridBlock):
                 self.input_dropout = nn.Dropout(dropout)
                 self.cnn_dropout = nn.Dropout(dropout)
             self.cnn_layer = ConvolutionalEncoder(
-                embed_size=embed_size, num_filters=num_filters,
+                embed_size, num_highways=num_highways,
+                num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
-                output_size=None, num_highway=num_highway, prefix='cnn_'
+                prefix='cnn_'
             )
             self.fc_layer = FCLayer(
                 num_layers=num_fc_layers, hidden_size=fc_hidden_size,
@@ -139,10 +138,9 @@ class TextRNN(nn.HybridBlock):
         super().__init__(**kwargs)
         self._dense_connection = dense_connection
         with self.name_scope():
-            self.rnn_layer = BiLSTMWithClip(
+            self.rnn_layer = BiLSTM(
                 num_rnn_layers, projection_size, hidden_size=hidden_size,
-                cell_clip=cell_clip, projection_clip=projection_clip,
-                dropout=dropout, prefix='rnn_'
+                cell_clip=cell_clip, dropout=dropout, prefix='rnn_'
             )
             if self._dense_connection == 'attention':
                 fc_layer = FCLayerWithAttention
@@ -192,10 +190,9 @@ class TextRCNN(nn.HybridBlock):
         with self.name_scope():
             if self._dropout:
                 self.input_dropout = nn.Dropout(dropout)
-            self.rnn_layer = BiLSTMWithClip(
+            self.rnn_layer = BiLSTM(
                 num_rnn_layers, projection_size, hidden_size=hidden_size,
-                cell_clip=cell_clip, projection_clip=projection_clip,
-                dropout=dropout, prefix='rnn_'
+                cell_clip=cell_clip, dropout=dropout, prefix='rnn_'
             )
             self.dense = nn.Dense(
                 fc_hidden_size, flatten=False,
@@ -225,56 +222,3 @@ class TextRCNN(nn.HybridBlock):
         return self.fc_layer(
             F.flatten(F.transpose(kmaxpooling_output, axes=(1, 0, 2)))
         )
-
-
-class TextTransformer(nn.HybridBlock):
-
-    def __init__(
-        self, attention_cell='multi_head', num_layers=2,
-        units=512, hidden_size=2048, max_length=50,
-        num_heads=4, scaled=True, dropout=0.0,
-        use_residual=True, output_attention=False,
-        weight_initializer=None, bias_initializer='zeros',
-        prefix=None, params=None, output_size=1,
-        num_fc_layers=1, fc_hidden_size=512, fc_activation='relu', **kwargs
-    ):
-        super().__init__(prefix=prefix)
-        with self.name_scope():
-            self.transformer_layer = BaseTransformerEncoder(
-                attention_cell=attention_cell,
-                num_layers=num_layers,
-                units=units,
-                hidden_size=hidden_size,
-                max_length=max_length,
-                num_heads=num_heads,
-                scaled=scaled,
-                dropout=dropout,
-                use_residual=use_residual,
-                output_attention=output_attention,
-                weight_initializer=weight_initializer,
-                bias_initializer=bias_initializer,
-                prefix=prefix, params=params,
-            )
-            self.fc_layer = FCLayer(
-                num_layers=num_fc_layers, hidden_size=fc_hidden_size,
-                activation=fc_activation, output_size=output_size
-            )
-
-    def hybrid_forward(self, F, input, mask, steps=None):
-        """
-        input: shape(seq_length, batch_size)
-        mask: shape(seq_length, batch_size)
-        """
-        transformer_output = self.transformer_layer(input, steps, mask)
-        valid_length = F.sum(mask, axis=1)
-        sentence_vec = F.broadcast_div(
-            F.sum(
-                F.SequenceMask(
-                    transformer_output, sequence_length=valid_length,
-                    use_sequence_length=True, axis=1
-                ),
-                axis=1
-            ),
-            F.sqrt(valid_length)
-        )
-        return self.fc_layer(sentence_vec)

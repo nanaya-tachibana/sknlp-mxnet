@@ -119,7 +119,10 @@ class AdaptiveSoftmax(nn.HybridBlock):
             )
             tail_loss = F.contrib.cond(
                 F.sum(mask) > 0,
-                functools.partial(update_tail_loss, tail_loss, mask, self.tail_layers[i], self._cutoffs[i]),
+                functools.partial(
+                    update_tail_loss, tail_loss, mask,
+                    self.tail_layers[i], self._cutoffs[i]
+                ),
                 lambda: tail_loss
             )
 

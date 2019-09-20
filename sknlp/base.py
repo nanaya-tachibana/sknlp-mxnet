@@ -88,13 +88,13 @@ class BaseModel:
                 trainer=trainer, dataloader=train_dataloader
             )
             avg_loss = self._one_epoch(trainer, train_dataloader, epoch, clip)
-            self._train_log(avg_loss)
             self._trained = True
-            if checkpoint is not None and epoch % save_frequency == 0:
-                self.save(f'{checkpoint}-{epoch:04}')
-
-            if valid_dataset is not None:
-                self._valid_log(valid_dataset)
+            if hvd is None or (hvd is not None and hvd.rank() == 0):
+                self._train_log(avg_loss)
+                if checkpoint is not None and epoch % save_frequency == 0:
+                    self.save(f'{checkpoint}-{epoch:04}')
+                if valid_dataset is not None:
+                    self._valid_log(valid_dataset)
 
     def _collect_params(self):
         params_dict = mx.gluon.ParameterDict()
@@ -197,7 +197,9 @@ class BaseModel:
         batch_sampler = BatchSampler(
             dataset, batch_size,
             sampler='bucket' if shuffle else 'sequential',
-            last_batch=last_batch, batchify_fn=self._batchify_fn()
+            last_batch=last_batch, batchify_fn=self._batchify_fn(),
+            num_parts=1 if hvd is None else hvd.size(),
+            part_index=0 if hvd is None else hvd.rank()
         )
         if self._prefetch > 0:
             return PrefetchDataLoader(batch_sampler, batch_size)

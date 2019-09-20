@@ -14,7 +14,7 @@ from ..base import DeepSupervisedModel
 from ..data import ClassifyDataset, InMemoryDataset
 from ..data.batchify import Pad, Stack
 from ..embedding import Token2vec
-from ..encode import TextCNN, TextRCNN, TextRNN, TextTransformer
+from ..encode import TextCNN, TextRCNN, TextRNN
 from ..segmenter import Segmenter
 from ..metric import classify_f_score
 from ..utils.array import sequence_mask
@@ -237,8 +237,10 @@ class DeepClassifier(DeepSupervisedModel):
             vocab=embedding_layer._vocab,
             is_multilabel=meta['is_multilabel'],
             label2idx=meta['label2idx'], segmenter=meta['segmenter'],
-            max_length=meta['max_length'], embed_size=meta['embed_size'], ctx=ctx
+            max_length=meta['max_length'], embed_size=meta['embed_size'],
+            ctx=ctx
         )
+        ins.meta = meta
         ins._trained = True
         ins._build(ctx, initialize=False)
         return ins
@@ -250,12 +252,7 @@ class DeepClassifier(DeepSupervisedModel):
             with open(os.path.join(temp_dir, 'meta.json')) as f:
                 meta = json.loads(f.read())
 
-            if meta['model_type'] == 'builtin-text_transformer_classifier':
-                return TextTransformerClassifier._load(
-                    temp_dir, meta, update=update,
-                    inputs=['data0', 'data1', 'data2'], ctx=ctx
-                )
-            elif meta['model_type'] == 'builtin-text_cnn_classifier':
+            if meta['model_type'] == 'builtin-text_cnn_classifier':
                 return TextCNNClassifier._load(
                     temp_dir, meta, update=update, ctx=ctx
                 )
@@ -288,7 +285,7 @@ class TextCNNClassifier(DeepClassifier):
         vocab=None, is_multilabel=False, label2idx=None, segmenter='jieba',
         max_length=100, embed_size=100,
         num_filters=(25, 50, 75, 100), ngram_filter_sizes=(1, 2, 3, 4),
-        conv_layer_activation='tanh', num_highway=1, dropout=0,
+        conv_layer_activation='tanh', num_highways=1, dropout=0,
         num_fc_layers=2, fc_hidden_size=512, fc_activation='tanh',
         ctx=mx.cpu(), **kwargs
     ):
@@ -298,7 +295,7 @@ class TextCNNClassifier(DeepClassifier):
                 num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
-                num_highway=num_highway,
+                num_highways=num_highways,
                 dropout=dropout,
                 num_fc_layers=num_fc_layers,
                 fc_hidden_size=fc_hidden_size,
@@ -315,7 +312,7 @@ class TextCNNClassifier(DeepClassifier):
             'num_filters': list(num_filters),
             'ngram_filter_sizes': list(ngram_filter_sizes),
             'conv_layer_activation': conv_layer_activation,
-            'num_highway': num_highway,
+            'num_highways': num_highways,
             'num_fc_layers': num_fc_layers,
             'fc_hidden_size': fc_hidden_size,
             'fc_activation': fc_activation
@@ -326,7 +323,7 @@ class TextCNNClassifier(DeepClassifier):
         vocab = self._vocab
         return functools.partial(
             cnn_batchify, vocab[vocab.padding_token],
-            min(self.meta['ngram_filter_sizes'])
+            max(self.meta['ngram_filter_sizes'])
         )
 
 
@@ -422,69 +419,3 @@ class TextRCNNClassifier(DeepClassifier):
             'fc_activation': fc_activation
         })
         self.meta.update({'model_type': 'builtin-text_rcnn_classifier'})
-
-
-class TextTransformerClassifier(DeepClassifier):
-
-    def __init__(
-        self, num_classes, encode_layer=None, embedding_layer=None,
-        is_multilabel=False, label2idx=None, vocab=None, segmenter='jieba',
-        max_length=100, embed_size=100,
-        attention_cell='multi_head', num_layers=2,
-        units=512, hidden_size=2048,
-        num_heads=4, scaled=True, dropout=0.0,
-        use_residual=True, output_attention=False,
-        weight_initializer=None, bias_initializer='zeros',
-        positional_weight='learned', use_bert_encoder=True,
-        use_layer_norm_before_dropout=False, scale_embed=True,
-        prefix=None, params=None, output_size=1,
-        num_fc_layers=1, fc_hidden_size=512, fc_activation='relu',
-        ctx=mx.cpu(), **kwargs
-    ):
-        if encode_layer is None:
-            encode_layer = TextTransformer(
-                attention_cell=attention_cell,
-                num_layers=num_layers,
-                units=units,
-                hidden_size=hidden_size,
-                max_length=max_length,
-                num_heads=num_heads,
-                scaled=scaled,
-                dropout=dropout,
-                use_residual=use_residual,
-                output_attention=output_attention,
-                weight_initializer=weight_initializer,
-                bias_initializer=bias_initializer,
-                params=params,
-                # extra configurations for transformer
-                positional_weight=positional_weight,
-                use_bert_encoder=use_bert_encoder,
-                use_layer_norm_before_dropout=use_layer_norm_before_dropout,
-                scale_embed=scale_embed,
-                num_fc_layers=num_fc_layers,
-                fc_hidden_size=fc_hidden_size,
-                fc_activation=fc_activation,
-                output_size=num_classes,
-                prefix='encode_'
-            )
-        super().__init__(
-            num_classes, encode_layer, embedding_layer=embedding_layer,
-            is_multilabel=is_multilabel, label2idx=label2idx,
-            vocab=vocab, segmenter=segmenter, max_length=max_length,
-            embed_size=embed_size, ctx=ctx, **kwargs
-        )
-        self.meta.update({
-            'attention_cell': attention_cell,
-            'num_layers': num_layers,
-            'units': units,
-            'hidden_size': hidden_size,
-            'max_length': max_length,
-            'num_heads': num_heads,
-            'scaled': scaled,
-            'dropout': dropout,
-            'use_residual': use_residual,
-            'output_attention': output_attention,
-            'weight_initializer': weight_initializer,
-            'bias_initializer': bias_initializer,
-        })
-        self.meta.update({'model_type': 'builtin-text_transformer_classifier'})

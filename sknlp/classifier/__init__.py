@@ -1,11 +1,11 @@
 from .classifier import (
     DeepClassifier, TextCNNClassifier, TextRCNNClassifier,
-    TextRNNClassifier, TextTransformerClassifier
+    TextRNNClassifier
 )
 from .utils import logits2classes
 
 
 __all__ = [
     'DeepClassifier', 'TextCNNClassifier', 'TextRCNNClassifier',
-    'TextRNNClassifier', 'TextTransformerClassifier', 'logits2classes'
+    'TextRNNClassifier', 'logits2classes'
 ]

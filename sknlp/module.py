@@ -1,10 +1,6 @@
 import mxnet as mx
 from mxnet.gluon import nn, rnn
-from gluonnlp.model import LSTMPCellWithClip
-from gluonnlp.model.transformer import (
-    _get_layer_norm, TransformerEncoderCell, _position_encoding_init
-)
-from gluonnlp.model.bert import BERTEncoderCell
+from gluonnlp.model import LSTMPCellWithClip, Highway
 from mxnet.gluon.contrib.rnn import VariationalDropoutCell
 
 
@@ -15,14 +11,17 @@ class BiLSTM(nn.HybridBlock):
         hidden_size=1024, cell_clip=3, dropout=0.5,
         i2h_weight_initializer=mx.initializer.Orthogonal(),
         h2h_weight_initializer=mx.initializer.Orthogonal(),
+        h2r_weight_initializer=mx.initializer.Orthogonal(),
         i2h_bias_initializer='zeros', h2h_bias_initializer='zeros',
-        input_size=0, return_all_layers=False, prefix='bilstm_', **kwargs
+        input_size=0, return_all_layers=False, prefix='bilstm_',
+        **kwargs
     ):
         super().__init__(prefix=prefix, **kwargs)
         self._num_layers = num_layers
         self._dropout = dropout
         self._layout = layout
         self._return_all_layers = return_all_layers
+        self._cell_clip = cell_clip
         with self.name_scope():
             self.input_dropout = nn.Dropout(dropout)
             self.forward_layers = []
@@ -33,8 +32,11 @@ class BiLSTM(nn.HybridBlock):
                         hidden_size, input_size=input_size,
                         i2h_weight_initializer=i2h_weight_initializer,
                         h2h_weight_initializer=h2h_weight_initializer,
-                        projection_size=projection_size, state_clip_nan=True,
-                        state_clip_min=-cell_clip, state_clip_max=cell_clip
+                        h2r_weight_initializer=h2r_weight_initializer,
+                        state_clip_nan=True,
+                        # mkldnn not support projection and state clip for now
+                        # projection_size=projection_size,
+                        # state_clip_min=-cell_clip, state_clip_max=cell_clip
                     )
                     layers.append(layer)
                     self.register_child(layer)
@@ -339,199 +341,53 @@ class BiLSTMWithClip(nn.HybridBlock):
         return out, [forward_states, backward_states]
 
 
-class BaseTransformerEncoder(nn.HybridBlock):
-    """Base Structure of the Transformer Encoder.
-    Parameters
-    ----------
-    attention_cell : AttentionCell or str, default 'multi_head'
-        Arguments of the attention cell.
-        Can be 'multi_head', 'scaled_luong', 'scaled_dot', 'dot', 'cosine', 'normed_mlp', 'mlp'
-    num_layers : int
-        Number of attention layers.
-    units : int
-        Number of units for the output.
-    hidden_size : int
-        number of units in the hidden layer of position-wise feed-forward networks
-    max_length : int
-        Maximum length of the input sequence
-    num_heads : int
-        Number of heads in multi-head attention
-    scaled : bool
-        Whether to scale the softmax input by the sqrt of the input dimension
-        in multi-head attention
-    dropout : float
-        Dropout probability of the attention probabilities.
-    use_residual : bool
-    output_attention: bool, default False
-        Whether to output the attention weights
-    output_all_encodings: bool, default False
-        Whether to output encodings of all encoder's cells, or only the last one
-    weight_initializer : str or Initializer
-        Initializer for the input weights matrix, used for the linear
-        transformation of the input.
-    bias_initializer : str or Initializer
-        Initializer for the bias vector.
-    positional_weight: str, default 'sinusoidal'
-        Type of positional embedding. Can be 'sinusoidal', 'learned'.
-        If set to 'sinusoidal', the embedding is initialized as sinusoidal values and keep constant.
-    use_bert_encoder : bool, default False
-        Whether to use BERTEncoderCell and BERTLayerNorm. Set to True for pre-trained BERT model
-    use_layer_norm_before_dropout: bool, default False
-        Before passing embeddings to attention cells, whether to perform `layernorm -> dropout` or
-        `dropout -> layernorm`. Set to True for pre-trained BERT models.
-    scale_embed : bool, default True
-        Scale the input embeddings by sqrt(embed_size). Set to False for pre-trained BERT models.
-    prefix : str, default 'rnn_'
-        Prefix for name of `Block`s
-        (and name of weight if params is `None`).
-    params : Parameter or None
-        Container for weight sharing between cells.
-        Created if `None`.
-    """
+class ConvEncoder(nn.HybridBlock):
 
     def __init__(
-        self, input_size=300, attention_cell='multi_head', num_layers=2,
-        units=512, hidden_size=2048, max_length=50,
-        num_heads=4, scaled=True, dropout=0.0,
-        use_residual=True, output_attention=False, output_all_encodings=False,
-        weight_initializer=None, bias_initializer='zeros',
-        positional_weight='sinusoidal', use_bert_encoder=False,
-        use_layer_norm_before_dropout=False, scale_embed=True,
-        prefix=None, params=None
+        self, input_size, num_highways=1, projection_size=0,
+        num_filters=(25, 50, 75, 100, 125, 150),
+        ngram_filter_sizes=(1, 2, 3, 4, 5, 6),
+        conv_layer_activation='relu', **kwargs
     ):
-        super(BaseTransformerEncoder, self).__init__(prefix=prefix, params=params)
-        assert units % num_heads == 0,\
-            'In TransformerEncoder, The units should be divided exactly ' \
-            'by the number of heads. Received units={}, num_heads={}' \
-            .format(units, num_heads)
-        self._input_size = input_size
-        self._num_layers = num_layers
-        self._max_length = max_length
-        self._num_heads = num_heads
-        self._units = units
-        self._hidden_size = hidden_size
-        self._output_attention = output_attention
-        self._output_all_encodings = output_all_encodings
-        self._dropout = dropout
-        self._use_residual = use_residual
-        self._scaled = scaled
-        self._use_layer_norm_before_dropout = use_layer_norm_before_dropout
-        self._scale_embed = scale_embed
+        super().__init__(**kwargs)
         with self.name_scope():
-            if dropout:
-                self.dropout_layer = nn.Dropout(rate=dropout)
-            self.layer_norm = _get_layer_norm(use_bert_encoder, units)
-            self.position_weight = self._get_positional(
-                positional_weight, max_length, units, weight_initializer
-            )
-            self.transformer_cells = nn.HybridSequential()
-            for i in range(num_layers):
-                cell = self._get_encoder_cell(
-                    use_bert_encoder, units, hidden_size, num_heads,
-                    attention_cell, weight_initializer, bias_initializer,
-                    dropout, use_residual, scaled, output_attention, i
-                )
-                self.transformer_cells.add(cell)
+            self.convs = []
+            maxpool_output_size = 0
+            with self.convs.name_scope():
+                for num_filter, ngram_size in zip(num_filters,
+                                                  ngram_filter_sizes):
+                    seq = nn.HybridSequential()
+                    seq.add(nn.Conv1D(
+                        in_channels=input_size,
+                        channels=num_filter,
+                        kernel_size=ngram_size,
+                        use_bias=True
+                    ))
+                    if conv_layer_activation is not None:
+                        seq.add(nn.Activation(conv_layer_activation))
+                    seq.add(nn.BatchNorm(axis=1))
+                    seq.add(mx.gluon.nn.HybridLambda(
+                        lambda F, x: F.max(x, axis=2)
+                    ))
+                    self.convs.append(seq)
+                    self.register_child(seq)
+                    maxpool_output_size += num_filter
 
-    def _get_positional(self, weight_type, max_length, units, initializer):
-        if weight_type == 'sinusoidal':
-            encoding = _position_encoding_init(max_length, units)
-            position_weight = self.params.get_constant('const', encoding)
-        elif weight_type == 'learned':
-            position_weight = self.params.get(
-                'position_weight', shape=(max_length, units),
-                init=initializer
-            )
-        else:
-            raise ValueError(
-                'Unexpected value for argument position_weight: %s'
-                % (position_weight)
-            )
-        return position_weight
+            self.highways = Highway(
+                maxpool_output_size, num_highways,
+            ) if num_highways > 0 else None
+            self.project = nn.Dense(
+                units=projection_size,
+                in_units=maxpool_output_size,
+            ) if projection_size > 0 else None
 
-    def _get_encoder_cell(
-        self, use_bert, units, hidden_size, num_heads, attention_cell,
-        weight_initializer, bias_initializer, dropout, use_residual,
-        scaled, output_attention, i
-    ):
-        cell = BERTEncoderCell if use_bert else TransformerEncoderCell
-        return cell(units=units, hidden_size=hidden_size,
-                    num_heads=num_heads, attention_cell=attention_cell,
-                    weight_initializer=weight_initializer,
-                    bias_initializer=bias_initializer,
-                    dropout=dropout, use_residual=use_residual,
-                    scaled=scaled, output_attention=output_attention,
-                    prefix='transformer%d_' % i
-                    )
-
-    def hybrid_forward(self, F, input, steps, mask, position_weight=None):
-        # pylint: disable=arguments-differ
-        """
-        Parameters
-        ----------
-        input : NDArray or Symbol, Shape(batch_size, length, C_in)
-        states : list of NDArray or Symbol
-        valid_length : NDArray or Symbol
-        position_weight : NDArray or Symbol
-        Returns
-        -------
-        output : NDArray or Symbol, or List[NDArray] or List[Symbol]
-            If output_all_encodings flag is False, then the output of the last encoder.
-            If output_all_encodings flag is True, then the list of all output of all encoders.
-            In both cases, shape of the tensor(s) is/are (batch_size, length, C_out)
-        additional_output : list
-            Either be an empty list or contains the attention weights in this step.
-            The attention weights will have shape (batch_size, length, length) or
-            (batch_size, num_heads, length, length)
-        """
-        # Positional Encoding
-        if self._scale_embed:
-            input = input * F.sqrt(self._input_size)
-
-        positional_embed = F.Embedding(
-            steps, position_weight, self._max_length, self._units
-        )
-        input = F.broadcast_add(
-            input, F.expand_dims(positional_embed, axis=0)
-        )
-        if self._dropout:
-            if self._use_layer_norm_before_dropout:
-                input = self.layer_norm(input)
-                input = self.dropout_layer(input)
-            else:
-                input = self.dropout_layer(input)
-                input = self.layer_norm(input)
-        else:
-            input = self.layer_norm(input)
-        output = input
-
-        valid_length = None
+    def hybrid_forward(self, F, input, mask=None):
         if mask is not None:
-            valid_length = F.sum(mask, axis=1)
-        all_encodings_output = []
-        additional_output = []
-        for cell in self.transformer_cells:
-            output, attention_weights = cell(input, mask)
-            input = output
-            if self._output_all_encodings:
-                if valid_length is not None:
-                    valid_length = F.sum(mask, axis=1)
-                    output = F.SequenceMask(
-                        output, sequence_length=valid_length,
-                        use_sequence_length=True, axis=1
-                    )
-                all_encodings_output.append(output)
-
-            if self._output_attention:
-                additional_output.append(attention_weights)
-
-        if valid_length is not None:
-            output = F.SequenceMask(
-                output, sequence_length=valid_length,
-                use_sequence_length=True, axis=1
-            )
-
-        if self._output_all_encodings:
-            return all_encodings_output, additional_output
-        else:
-            return output, additional_output
+            input = F.broadcast_mul(input, mask.expand_dims(-1))
+        input = F.transpose(input, axes=(1, 2, 0))
+        output = F.concat(*[conv(input) for conv in self.convs], dim=-1)
+        if self.highways is not None:
+            output = self.highways(output)
+        if self.project is not None:
+            output = self.project(output)
+        return output
