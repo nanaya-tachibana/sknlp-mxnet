@@ -1,6 +1,6 @@
 from mxnet.gluon import nn, contrib
 from gluonnlp.model import ConvolutionalEncoder
-from .module import BiLSTM, ConvEncoder
+from .module import BiLSTMWithClip
 
 
 class _HybridConcurrent(contrib.nn.HybridConcurrent):
@@ -102,7 +102,7 @@ class TextCNN(nn.HybridBlock):
                 self.input_dropout = nn.Dropout(dropout)
                 self.cnn_dropout = nn.Dropout(dropout)
             self.cnn_layer = ConvolutionalEncoder(
-                embed_size, num_highways=num_highways,
+                embed_size, num_highway=num_highways,
                 num_filters=num_filters,
                 ngram_filter_sizes=ngram_filter_sizes,
                 conv_layer_activation=conv_layer_activation,
@@ -138,9 +138,10 @@ class TextRNN(nn.HybridBlock):
         super().__init__(**kwargs)
         self._dense_connection = dense_connection
         with self.name_scope():
-            self.rnn_layer = BiLSTM(
+            self.rnn_layer = BiLSTMWithClip(
                 num_rnn_layers, projection_size, hidden_size=hidden_size,
-                cell_clip=cell_clip, dropout=dropout, prefix='rnn_'
+                cell_clip=cell_clip, projection_clip=3, dropout=dropout,
+                prefix='rnn_'
             )
             if self._dense_connection == 'attention':
                 fc_layer = FCLayerWithAttention
@@ -190,9 +191,10 @@ class TextRCNN(nn.HybridBlock):
         with self.name_scope():
             if self._dropout:
                 self.input_dropout = nn.Dropout(dropout)
-            self.rnn_layer = BiLSTM(
+            self.rnn_layer = BiLSTMWithClip(
                 num_rnn_layers, projection_size, hidden_size=hidden_size,
-                cell_clip=cell_clip, dropout=dropout, prefix='rnn_'
+                cell_clip=cell_clip, projection_clip=3, dropout=dropout,
+                prefix='rnn_'
             )
             self.dense = nn.Dense(
                 fc_hidden_size, flatten=False,
