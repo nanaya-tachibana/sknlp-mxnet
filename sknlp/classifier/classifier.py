@@ -87,14 +87,16 @@ class DeepClassifier(DeepSupervisedModel):
     def _get_or_build_dataset(self, dataset, X, y):
         assert (X and y) or dataset
         if dataset:
-            self.idx2labels = dataset.idx2labels
+            if not hasattr(self, 'idx2labels'):
+                self.idx2labels = dataset.idx2labels
             return dataset
         dataset = ClassifyDataset(
             InMemoryDataset(X, y),
             vocab=self._vocab, label2idx=self._label2idx,
             segmenter=self._cut, max_length=self._max_length
         )
-        self.idx2labels = dataset.idx2labels
+        if not hasattr(self, 'idx2labels'):
+            self.idx2labels = dataset.idx2labels
         return dataset
 
     def _valid_log(self, valid_dataset):
@@ -195,12 +197,14 @@ class DeepClassifier(DeepSupervisedModel):
         predictions = self.predict(
             dataset=dataset, threshold=threshold, batch_size=batch_size
         )
+        _y = np.vstack([l for _, l in dataset])
         if self._is_multilabel:
-            _y = np.vstack([l for _, l in dataset])
             _predictions = dataset._binarizer.transform(predictions)
         else:
-            _y = y
-            _predictions = predictions
+            _y = _y.argmax(axis=1)
+            _predictions = dataset._binarizer.transform([
+                [p] for p in predictions
+            ]).argmax(axis=1)
         return classify_f_score(
             _y, _predictions, self._is_multilabel,
             labels=self.idx2labels(range(self._num_classes))
