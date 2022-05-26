@@ -11,5 +11,5 @@ scikit-learn==0.20.3
 scipy==1.2.1
 sklearn==0.0
 tqdm==4.31.1
-ujson==1.35
+ujson==5.2.0
 oss2==2.6.1
