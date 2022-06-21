@@ -4,7 +4,7 @@ gensim==3.7.2
 gluonnlp==0.6.0
 jieba-fast==0.53
 mxnet-mkl==1.4.0
-numpy==1.14.6
+numpy==1.22.0
 pandas==0.24.2
 sanic==19.3.1
 scikit-learn==0.20.3
