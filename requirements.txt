@@ -6,7 +6,7 @@ jieba-fast==0.53
 mxnet-mkl==1.4.0
 numpy==1.14.6
 pandas==0.24.2
-sanic==19.3.1
+sanic==20.12.7
 scikit-learn==0.20.3
 scipy==1.2.1
 sklearn==0.0
